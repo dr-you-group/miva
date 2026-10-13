@@ -381,5 +381,3 @@ SHA256SUMS
 | DB 접속 실패 | `micdm.env`의 키 이름과 값 (값 뒤 주석 금지), 방화벽, SQL Server는 TCP/IP 활성화와 포트 1433 |
 | `min_test_positives` 오류로 profile 실패 | test 양성 수가 100건 미만. 코호트 규모 문제이므로 연구실에 알린다 |
 | models [mival-xecg] 실패 | GPU, 드라이버. GPU가 없으면 정상적으로 건너뛴다 |
-
-문의: 연세대학교 의과대학 의생명시스템정보학교실
