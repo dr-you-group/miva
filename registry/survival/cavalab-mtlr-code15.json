@@ -1,0 +1,102 @@
+{
+  "model_id": "cavalab-mtlr-code15",
+  "Name": "cavalab ECG survival benchmark, ResNet MTLR (CODE-15, with age and sex)",
+  "Summary": "MTLR survival over 100 bins (0-7.68 y) from a 12-lead ECG plus age and sex.",
+  "Link": "https://zenodo.org/records/16877773",
+  "Descriptors": {
+    "Version": "Code15 ResNet MTLR w Dem.pt",
+    "References": [
+      "arXiv:2406.17002"
+    ]
+  },
+  "Model properties": {
+    "Input": "12-lead, 400 Hz, middle 7 s, per-lead z-score with stored statistics, padded to 4096"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/cavalab-mtlr-code15/mival_state_dict.pt",
+        "sha256": "b078fe51c2346a0fe1ca90c726feadb764aa9777b7dba0e05321265511fbb10c",
+        "role": "full",
+        "derived_from": {
+          "uri": "/data/mi-val/models/cavalab-mtlr-code15/Code15 ResNet MTLR w Dem.pt",
+          "sha256": "0e8d25b3935dce8274505f9d62fa346a3f31056c2c99e9747f4d8f6a44d717c8",
+          "by": "mival_wrap_cavalab.convert"
+        }
+      }
+    ],
+    "weights_format": "state_dict",
+    "builder": {
+      "module": "mival_wrap_cavalab:DeepSurvCode15",
+      "kwargs": {
+        "n_outputs": 100,
+        "n_covariates": 2,
+        "cov_layers": 3,
+        "cov_dim": 32
+      }
+    },
+    "code_path": "${MIVAL_HOME}/miva/registry/wrappers",
+    "ensemble": {
+      "method": "none",
+      "members": 1
+    },
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "III",
+        "aVR",
+        "aVL",
+        "aVF",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 400,
+      "duration_s": 7,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "none",
+      "gain": 1.0,
+      "layout": "lead_time",
+      "dtype": "float32",
+      "crop_anchor": "center"
+    },
+    "output": {
+      "type": "mtlr",
+      "n_bins": 100,
+      "max_duration_days": 2803.9,
+      "horizon_days": 365
+    },
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {
+      "framework": "torch==2.13.0+cu130",
+      "python": "3.10.20",
+      "device": "cuda",
+      "env": "${MIVAL_HOME}/envs/mival-torch",
+      "returns": [
+        "logits"
+      ]
+    },
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "pretraining_corpora": [
+      "code15"
+    ],
+    "code_commit": "199eab6bd1ef2a06754f4d27104cbdcdd8f17097",
+    "notes": "Covariates Age (years) and Is_Male (0/1), passed raw as in the benchmark (Cov_train = df[cov_list] as float32). Bins: pycox label_transform(100), equidistant cuts on [0, max_duration] with max_duration 7.676706 years = 2803.9 days; risk at 365 days interpolated on the survival curve. Input handling as cavalab-deepsurv-code15 (mV, stored NM/NS z-score, middle 7 s padded to 4096). Code GPL-3.0, weights CC-BY-4.0.",
+    "covariates": [
+      "age_years",
+      "sex_male"
+    ]
+  }
+}

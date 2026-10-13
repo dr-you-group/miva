@@ -1,0 +1,33 @@
+{
+  "model_id": "heartwise-lvef-regression",
+  "Name": "HeartWise DeepECG-SL EfficientNetV2, LVEF regression",
+  "Summary": "Supervised single-task regression model for LVEF percent.",
+  "Link": "https://huggingface.co/heartwise/deepecg-sl_finetuned_LVEF_MHI",
+  "Descriptors": {"Version": "1ee6698a3759", "References": ["doi:10.1093/eurheartj/ehaf1119"]},
+  "Model properties": {"Input": "12-lead surface ECG, 10 seconds at 250 Hz"},
+  "Imaging": {"Modality": "ECG"},
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [{"uri": "${MIVAL_HOME}/models/heartwise-lvef/LVEF_MSE_SL.pt", "sha256": "cc46c6e95f7e9e138f1460747ce3545db9e932a2431963bd478561b65f4926b7", "role": "full"}],
+    "weights_format": "checkpoint",
+    "state_dict_key": "state_dict",
+    "code_path": "${MIVAL_HOME}/code/deepecg-docker/notebooks",
+    "builder": {"module": "EfficientNetv2:EfficientNet1DV2", "kwargs": {"num_classes": 1, "expansion_factors": [1, 2, 2, 2, 2, 2, 2]}},
+    "rename_keys": {"classifier.fc1.": "classifier.3."},
+    "ensemble": {"method": "none", "members": 1},
+    "input_contract": {
+      "leads": ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"],
+      "sampling_rate_hz": 250, "duration_s": 10, "unit": "mV", "filters": [],
+      "scaling": "none", "gain": 208.3333, "layout": "lead_time", "dtype": "float32"
+    },
+    "output": {"type": "regression", "n_outputs": 1, "value_index": 0, "unit": "%"},
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {"framework": "torch==2.13.0+cu130", "python": "3.10.20", "device": "cuda",
+                "env": "${MIVAL_HOME}/envs/mival-torch", "returns": ["logits"]},
+    "training_modes_supported": ["inference_only"],
+    "pretraining_corpora": ["mhi"],
+    "code_commit": "cabf6c06b74731c86b8c5a27ae7101f14db5ec38",
+    "notes": "Outputs LVEF in percent directly (checkpoint metrics: MAE 7.55, R2 0.46 on the authors' validation set). Same gain caveat as the binary card."
+  }
+}

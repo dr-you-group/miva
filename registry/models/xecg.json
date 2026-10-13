@@ -1,0 +1,45 @@
+{
+  "model_id": "xecg",
+  "Name": "xECG base (xLSTM foundation)",
+  "Summary": "xLSTM-based ECG foundation model; pooled 1024-d representation, no task head.",
+  "Link": "https://huggingface.co/riccardolunelli/xECG_base_model_v1",
+  "Descriptors": {"Version": "b06053253a9b", "References": ["arXiv:2509.10151"]},
+  "Model properties": {"Input": "12-lead surface ECG, 10 seconds at 100 Hz"},
+  "Imaging": {"Modality": "ECG"},
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [{"uri": "${MIVAL_HOME}/models/xecg/model.safetensors", "sha256": "812dec69ac0fbf13f39e50bde4f35f85435a66966d8785baec65c2b5c70e722c", "role": "backbone"}],
+    "weights_format": "safetensors",
+    "code_path": "${MIVAL_HOME}/models/xecg",
+    "builder": {
+      "module": "xECG:xECG",
+      "kwargs": {
+        "cls_type": "avg",
+        "config": {"activation_fn": "gelu", "batch_size": 32, "cls_normalization": null, "cls_type": "avg",
+                   "drop_path_prob": 0.0, "dropout": 0.0, "embedding_size": 1024, "num_heads": 4, "patch_size": 25,
+                   "proj_factor": 2, "sampling_freq": 100, "xlstm_config": ["s", "s", "m", "m", "s", "s", "m", "m", "s"]}
+      }
+    },
+    "ensemble": {"method": "none", "members": 1},
+    "input_contract": {
+      "leads": ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"],
+      "sampling_rate_hz": 100, "duration_s": 10, "unit": "mV", "filters": [],
+      "scaling": "none", "layout": "time_lead", "dtype": "float32"
+    },
+    "output": {"type": "logits", "n_outputs": null, "positive_index": null},
+    "feature_layer": "pooled",
+    "feature_width": 1024,
+    "threshold": {},
+    "runtime": {"framework": "torch==2.8.0+cu128", "python": "3.12.13", "device": "cuda",
+                "env": "${MIVAL_HOME}/envs/mival-xecg", "slstm_backend": "cuda",
+                "returns": ["features", "ignore"],
+                "compile_env": {"CUDA_HOME": "/usr/local/cuda-12.8", "CC": "gcc-14", "CXX": "g++-14",
+                                "NVCC_PREPEND_FLAGS": "-ccbin g++-14",
+                                "TORCH_EXTENSIONS_DIR": "${MIVAL_HOME}/cache/torch_extensions",
+                                "TORCH_CUDA_ARCH_LIST": "8.9"}},
+    "training_modes_supported": ["linear_probe", "partial_unfreeze", "full_finetune"],
+    "pretraining_corpora": ["code", "chapman-ningbo", "incart"],
+    "code_commit": "13e57523e418d8cddced73f81b27ba541413f4f3",
+    "notes": "Forward returns (pooled, patches); only the pooled representation is used. Zero-valued samples are treated as padding by the model, so scaling must stay 'none'. Downsampled 500 to 100 Hz by the resample op."
+  }
+}

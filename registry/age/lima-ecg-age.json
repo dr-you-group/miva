@@ -1,0 +1,120 @@
+{
+  "model_id": "lima-ecg-age",
+  "Name": "Lima ECG-age (CODE ResNet)",
+  "Summary": "Ribeiro-style ResNet1d regressing age in years from a 12-lead ECG.",
+  "Link": "https://zenodo.org/records/4892365",
+  "Descriptors": {
+    "Version": "model.zip (2021-06-02)",
+    "References": [
+      "doi:10.1038/s41467-021-25351-7"
+    ]
+  },
+  "Model properties": {
+    "Input": "12-lead, 400 Hz, 4096 samples (10 s centred, zero-padded)"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/lima-ecg-age/model/model.pth",
+        "sha256": "6d649c0323b36fa0d7a33119cd61a049d2bbc24f860205ec8bc48098726ef40b",
+        "role": "full"
+      }
+    ],
+    "weights_format": "checkpoint",
+    "state_dict_key": "model",
+    "builder": {
+      "module": "resnet:ResNet1d",
+      "kwargs": {
+        "input_dim": [
+          12,
+          4096
+        ],
+        "blocks_dim": [
+          [
+            64,
+            4096
+          ],
+          [
+            128,
+            1024
+          ],
+          [
+            196,
+            256
+          ],
+          [
+            256,
+            64
+          ],
+          [
+            320,
+            16
+          ]
+        ],
+        "n_classes": 1,
+        "kernel_size": 17,
+        "dropout_rate": 0.8
+      }
+    },
+    "code_path": "${MIVAL_HOME}/code/ecg-age-prediction",
+    "ensemble": {
+      "method": "none",
+      "members": 1
+    },
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "III",
+        "aVR",
+        "aVL",
+        "aVF",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 400,
+      "duration_s": 10.24,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "none",
+      "gain": 1.0,
+      "layout": "lead_time",
+      "dtype": "float32",
+      "pad_anchor": "center"
+    },
+    "output": {
+      "type": "regression",
+      "n_outputs": 1,
+      "value_index": 0,
+      "unit": "years",
+      "weight_key": "lin.weight"
+    },
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {
+      "framework": "torch==2.13.0+cu130",
+      "python": "3.10.20",
+      "device": "cuda",
+      "env": "${MIVAL_HOME}/envs/mival-torch",
+      "returns": [
+        "logits"
+      ]
+    },
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "pretraining_corpora": [
+      "code"
+    ],
+    "code_commit": "f192e49e095708c038e4f430a41ad31fc4d3f8bd",
+    "notes": "Input unit is mV (gain 1). Checked on 300 MIMIC sample ECGs (2026-10-07): input x1 MAE 9.5 y, r 0.81; x10 MAE 14.3 y, bias -11.9; the README's '1e-4 V' and the one-ECG check that suggested x10 were wrong. scale_multiplier in train.py is parsed but never used. Weights CC-BY-4.0, code MIT."
+  }
+}

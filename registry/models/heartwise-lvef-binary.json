@@ -1,0 +1,29 @@
+{
+  "model_id": "heartwise-lvef-binary",
+  "Name": "HeartWise DeepECG-SL EfficientNetV2, LVEF <= 40",
+  "Summary": "Supervised single-task binary classifier for LVEF <= 40%.",
+  "Link": "https://huggingface.co/heartwise/EfficientNetV2_LVEF_equal_under_40",
+  "Descriptors": {"Version": "973b356566b0", "References": ["doi:10.1093/eurheartj/ehaf1119"]},
+  "Model properties": {"Input": "12-lead surface ECG, 10 seconds at 250 Hz"},
+  "Imaging": {"Modality": "ECG"},
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [{"uri": "${MIVAL_HOME}/models/heartwise-lvef/lvef_under_equal_40.pt", "sha256": "605cabad817067c225602e70158b15a65a5bfdd8fc94fdec1f54fc3c228541e8", "role": "full"}],
+    "weights_format": "jit",
+    "ensemble": {"method": "none", "members": 1},
+    "input_contract": {
+      "leads": ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"],
+      "sampling_rate_hz": 250, "duration_s": 10, "unit": "mV", "filters": [],
+      "scaling": "none", "gain": 208.3333, "layout": "lead_time", "dtype": "float32"
+    },
+    "output": {"type": "logits", "n_outputs": 1, "positive_index": 0},
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {"framework": "torch==2.13.0+cu130", "python": "3.10.20", "device": "cuda",
+                "env": "${MIVAL_HOME}/envs/mival-torch", "returns": ["logits"]},
+    "training_modes_supported": ["inference_only"],
+    "pretraining_corpora": ["mhi"],
+    "code_commit": "cabf6c06b74731c86b8c5a27ae7101f14db5ec38",
+    "notes": "gain 208.3333 is the authors' 1/0.0048 factor applied before the model (efficientnet_wrapper.mhi_factor). The authors' cohort-level spectral scaling (ledger L2-2) is not applied. TorchScript exposes no representation, so only inference_only."
+  }
+}

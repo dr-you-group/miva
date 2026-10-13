@@ -1,0 +1,53 @@
+{
+  "model_id": "ecgfounder",
+  "Name": "ECGFounder (12-lead)",
+  "Summary": "Large-scale supervised ECG foundation model producing 1024-dimensional representations and 150 pretraining logits.",
+  "Link": "https://huggingface.co/PKUDigitalHealth/ECGFounder",
+  "Descriptors": {
+    "Version": "d9b1793951b2342f5f7e84f1ac03cd37f8a08724",
+    "References": []
+  },
+  "Model properties": {
+    "Input": "12-lead surface ECG, 10 seconds at 500 Hz"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [
+      {"uri": "${MIVAL_HOME}/models/ecgfounder/12_lead_ECGFounder.pth", "sha256": "ee199f3781f4ae1f732973267f003da0a759ea12bddb0dd28a77faa60aca7997", "role": "backbone"}
+    ],
+    "ensemble": {"method": "none", "members": 1},
+    "input_contract": {
+      "leads": ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"],
+      "sampling_rate_hz": 500,
+      "duration_s": 10,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "global_zscore",
+      "layout": "lead_time",
+      "dtype": "float32"
+    },
+    "output": {"type": "logits", "n_outputs": 150, "positive_index": null, "weight_key": "dense.weight"},
+    "feature_layer": "backbone",
+    "threshold": {},
+    "runtime": {"framework": "torch==2.13.0+cu130", "python": "3.10.20", "device": "cuda", "env": "${MIVAL_HOME}/envs/mival-torch", "returns": ["logits", "features"]},
+    "training_modes_supported": ["linear_probe", "partial_unfreeze", "full_finetune"],
+    "pretraining_corpora": ["harvard-emory-ecg"],
+    "code_path": "${MIVAL_HOME}/code/ecgfounder",
+    "code_commit": "68d25f25e323a4a423b9d9e8ea2e0af3f234bf22",
+    "feature_width": 1024,
+    "weights_format": "checkpoint",
+    "state_dict_key": "state_dict",
+    "builder": {
+      "module": "net1d:Net1D",
+      "kwargs": {"in_channels": 12, "base_filters": 64, "ratio": 1,
+                 "filter_list": [64, 160, 160, 400, 400, 1024, 1024],
+                 "m_blocks_list": [2, 2, 2, 3, 3, 4, 4], "kernel_size": 16, "stride": 2,
+                 "groups_width": 16, "n_classes": 150, "use_bn": false, "use_do": false,
+                 "return_features": true, "verbose": false}
+    },
+    "notes": "This checkpoint emits no STEMI probability. A STEMI head must be fitted; inference_only is therefore not a supported training mode."
+  }
+}

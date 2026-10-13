@@ -1,0 +1,15 @@
+# 기관 설정. $MIVAL_HOME/config/site.yaml 로 복사해서 채운다.
+# study 4개(studies/*/study.yaml)가 모두 이 파일을 읽는다. 기관이 바꾸는 값은 여기에만 있다.
+# ${MIVAL_HOME} 은 실행할 때 환경변수 값으로 바뀐다.
+
+site: my-site                      # 기관 식별자 (예: severance). 결과 manifest에 기록됨
+
+retrieve:
+  dbms: postgresql                 # postgresql 또는 sqlserver
+  dsn_env: ${MIVAL_HOME}/config/micdm.env   # DB 접속 파일 (micdm.env.example 참고)
+  schema: cdm                      # MI-CDM 테이블이 있는 schema. SQL Server는 CDM2025.dbo 형식 가능
+  modality_concept_id: 4145308     # image_occurrence에서 12-lead ECG를 가리키는 concept
+  local_path_root: null            # null이면 image_occurrence.local_path를 그대로 읽음 (README 4.2)
+
+models:
+  cohort_sources: [my-site-ecg]    # 이 코호트의 데이터셋 이름. 모델 사전학습 데이터와 겹침 표시용

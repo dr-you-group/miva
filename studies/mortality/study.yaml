@@ -1,0 +1,38 @@
+study_id: mortality
+site_config: ${MIVAL_HOME}/config/site.yaml  # 기관 설정 (site, DB, schema, DICOM 경로). README 4.2
+seed: 20261007
+
+stages:
+  retrieve:
+    require_local_file: true
+    ecg_selection: {per_person: one, rule: random}
+    label_source: {kind: death_within, horizon_days: 365}
+
+  profile:
+    test_fraction: 0.2
+    n_folds: 5
+    stratify_on: label_event
+    min_test_positives: 100
+
+  preprocess:
+    loader: dicom
+    allow_upsample: false
+    perturbation:
+      axes:
+        resample: [500]
+        duration: [10]
+    registry: registry/survival
+    pad_policy: reject
+
+  models:
+    registry: registry/survival
+    batch_size: 64
+    arms:
+      - {model_id: cavalab-deepsurv-code15, training_mode: inference_only, label_def: survival}
+      - {model_id: cavalab-mtlr-code15, training_mode: inference_only, label_def: survival}
+
+  evaluate:
+    outcomes: {death_1y: null}
+    horizons_days: [365]
+    bootstrap_replicates: 2000
+    figures: true

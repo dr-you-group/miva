@@ -1,0 +1,41 @@
+study_id: potassium
+site_config: ${MIVAL_HOME}/config/site.yaml  # 기관 설정 (site, DB, schema, DICOM 경로). README 4.2
+seed: 20261007
+
+stages:
+  retrieve:
+    label_concept_id: 3023103  # Potassium [Moles/volume] in Serum or Plasma (LOINC 2823-3)
+    window_days: 0  # same calendar day as the ECG
+    window_days_sens2: 1
+    implausible_below: 1.5
+    require_local_file: true
+    ecg_selection: {per_person: one, rule: random}
+
+  profile:
+    test_fraction: 0.2
+    n_folds: 5
+    stratify_on: none
+    min_test_positives: 0
+
+  preprocess:
+    loader: dicom
+    registry: registry/potassium
+    allow_upsample: false
+    pad_policy: zero  # von Bachmann centres 10 s in 4096 samples at 400 Hz
+    perturbation:
+      axes:
+        resample: [500]
+        duration: [10.24]
+
+  models:
+    registry: registry/potassium
+    batch_size: 64
+    arms:
+      - {model_id: kardionet-k-12lead, training_mode: inference_only, label_def: value}
+      - {model_id: vonbachmann-k, training_mode: inference_only, label_def: value}
+
+  evaluate:
+    outcomes: {potassium: null}
+    regression_cuts: {value: [3.5, 5.5]}
+    bootstrap_replicates: 2000
+    figures: true

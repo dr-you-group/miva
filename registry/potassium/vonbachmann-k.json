@@ -1,0 +1,112 @@
+{
+  "model_id": "vonbachmann-k",
+  "Name": "von Bachmann ECG potassium regression (5-fold ResNet)",
+  "Summary": "Serum potassium from 8 leads, 5-model mean, z-score inverted.",
+  "Link": "https://zenodo.org/records/7456316",
+  "Descriptors": {
+    "Version": "regression_models/potassium/model_0..4",
+    "References": [
+      "doi:10.1038/s41598-024-65223-w"
+    ]
+  },
+  "Model properties": {
+    "Input": "8 leads (I, II, V1-V6), 400 Hz, 10 s centred in 4096, 0.8 Hz elliptic high-pass"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {
+      "framework": "torch==2.13.0+cu130",
+      "python": "3.10.20",
+      "device": "cuda",
+      "env": "${MIVAL_HOME}/envs/mival-torch",
+      "returns": [
+        "logits"
+      ]
+    },
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "ensemble": {
+      "method": "mean",
+      "members": 5
+    },
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/vonbachmann-k/regression_models/potassium/model_0/model.pth",
+        "sha256": "db7162315c07d2b66ed73c1f4b2959fc71cbd265ecf44c261f3ed1ee56c32f20",
+        "role": "ensemble_member"
+      },
+      {
+        "uri": "${MIVAL_HOME}/models/vonbachmann-k/regression_models/potassium/model_1/model.pth",
+        "sha256": "43e7431a21d3bb810b3857491135e5263465f4adbdc5bb29cb7e26e1128e389a",
+        "role": "ensemble_member"
+      },
+      {
+        "uri": "${MIVAL_HOME}/models/vonbachmann-k/regression_models/potassium/model_2/model.pth",
+        "sha256": "25d89c67d806aeb28fa334539aaec88df446466904b2d94cb25f3112946efe16",
+        "role": "ensemble_member"
+      },
+      {
+        "uri": "${MIVAL_HOME}/models/vonbachmann-k/regression_models/potassium/model_3/model.pth",
+        "sha256": "b7f3c2ce1c5b15b7cf0c821bb6b2752d00a321598b5ab3e4ab1f360276c0a49a",
+        "role": "ensemble_member"
+      },
+      {
+        "uri": "${MIVAL_HOME}/models/vonbachmann-k/regression_models/potassium/model_4/model.pth",
+        "sha256": "079659b51c862ab99e62ecbea62933c79e7cc440d8a0cbb116ffe4f566a34010",
+        "role": "ensemble_member"
+      }
+    ],
+    "weights_format": "checkpoint",
+    "state_dict_key": "model",
+    "rename_keys": {
+      "": "net."
+    },
+    "builder": {
+      "module": "mival_wrap_potassium:VonBachmannPotassium",
+      "kwargs": {}
+    },
+    "code_path": "${MIVAL_HOME}/miva/registry/wrappers",
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 400,
+      "duration_s": 10.24,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "none",
+      "layout": "lead_time",
+      "dtype": "float32",
+      "pad_anchor": "center"
+    },
+    "output": {
+      "type": "regression",
+      "n_outputs": 1,
+      "value_index": 0,
+      "unit": "mmol/L",
+      "transform": {
+        "kind": "affine",
+        "scale": 0.5,
+        "offset": 3.99
+      }
+    },
+    "pretraining_corpora": [
+      "uppsala-ed"
+    ],
+    "code_commit": "be88849d9ceebc87e29c97b0c00ba1bd45a8a5cf",
+    "notes": "Targets were z-scored in training (normalize: true) and the training mean/SD are not shipped; the inverse uses the paper's Table 1 cohort values (3.99 +/- 0.50 mmol/L), so absolute calibration is approximate and MAE/bias carry that error; rank-based metrics do not. The paper's median model is #3; the card averages all five. Elliptic 0.8 Hz high-pass (authors' remove_baseline_filter) runs in the wrapper on the unpadded 10 s. MIT / CC-BY."
+  }
+}

@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+
+# 접속 정보와 기관 데이터는 저장소에 넣지 않는다
+config/micdm.env
+*.env
+!config/*.env.example
+/runs/
+*.dcm
+*.h5
+*.pth
+*.pt
+*.safetensors
+*.parquet

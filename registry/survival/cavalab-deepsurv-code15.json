@@ -1,0 +1,92 @@
+{
+  "model_id": "cavalab-deepsurv-code15",
+  "Name": "cavalab ECG survival benchmark, ResNet DeepSurv (CODE-15, no demographics)",
+  "Summary": "Cox log-risk of all-cause death from a 12-lead ECG.",
+  "Link": "https://zenodo.org/records/16877773",
+  "Descriptors": {
+    "Version": "Code15 ResNet DeepSurv no Dem.pt",
+    "References": [
+      "arXiv:2406.17002"
+    ]
+  },
+  "Model properties": {
+    "Input": "12-lead, 400 Hz, middle 7 s, per-lead z-score with stored statistics, padded to 4096"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/cavalab-deepsurv-code15/mival_state_dict.pt",
+        "sha256": "67dd4197ee536d413cc786f53bb4819bda0fb8dd2935947d4af02064ec9eb165",
+        "role": "full",
+        "derived_from": {
+          "uri": "/data/mi-val/models/cavalab-deepsurv-code15/Code15 ResNet DeepSurv no Dem.pt",
+          "sha256": "a72c1a9d5ae364e4eac38f825aade99df2e364d329cf91517e27a341dfb3a7f8",
+          "by": "mival_wrap_cavalab.convert"
+        }
+      }
+    ],
+    "weights_format": "state_dict",
+    "builder": {
+      "module": "mival_wrap_cavalab:DeepSurvCode15",
+      "kwargs": {}
+    },
+    "code_path": "${MIVAL_HOME}/miva/registry/wrappers",
+    "ensemble": {
+      "method": "none",
+      "members": 1
+    },
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "III",
+        "aVR",
+        "aVL",
+        "aVF",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 400,
+      "duration_s": 7,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "none",
+      "gain": 1.0,
+      "layout": "lead_time",
+      "dtype": "float32",
+      "crop_anchor": "center"
+    },
+    "output": {
+      "type": "risk_score",
+      "n_outputs": 1,
+      "value_index": 0
+    },
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {
+      "framework": "torch==2.13.0+cu130",
+      "python": "3.10.20",
+      "device": "cuda",
+      "env": "${MIVAL_HOME}/envs/mival-torch",
+      "returns": [
+        "logits"
+      ]
+    },
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "pretraining_corpora": [
+      "code15"
+    ],
+    "code_commit": "199eab6bd1ef2a06754f4d27104cbdcdd8f17097",
+    "notes": "Higher output = higher hazard (Cox log-risk). No baseline hazard is shipped, so only discrimination is evaluated. Input unit mV (gain 1): CODE tracings are mV, established on Lima ECG-age (same corpus) where x1 gives MAE 9.5 y and x10 a 12-year bias; on 1,000 MIMIC sample ECGs (34 deaths) this model's C-index was 0.82 at x1 and 0.79 at x10, too few events to separate. Stored per-lead NM/NS (nchW) are applied in the wrapper, then 648 zeros each side. Lead order is CODE-15 standard (I, II, III, aVR, aVL, aVF); the benchmark's aVL/aVF swap applies to its own MIMIC h5, not to named leads. Code GPL-3.0, weights CC-BY-4.0."
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "model_id": "kardionet-k-12lead",
+  "Name": "Kardio-Net 12-lead potassium (EffNet)",
+  "Summary": "Serum potassium (mEq/L) from a 12-lead ECG.",
+  "Link": "https://github.com/ecg-net/hyperkalemia",
+  "Descriptors": {
+    "Version": "model_12_lead.pt",
+    "References": [
+      "doi:10.1016/j.jacep.2024.07.023"
+    ]
+  },
+  "Model properties": {
+    "Input": "12-lead, 500 Hz, 5000 samples, baseline removal + wavelet denoising + cohort lead-wise z-score"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "torch",
+    "feature_layer": null,
+    "threshold": {},
+    "runtime": {
+      "framework": "torch==2.13.0+cu130",
+      "python": "3.10.20",
+      "device": "cuda",
+      "env": "${MIVAL_HOME}/envs/mival-torch",
+      "returns": [
+        "logits"
+      ]
+    },
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "ensemble": {
+      "method": "none",
+      "members": 1
+    },
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/kardionet-k-12lead/mival_state_dict.pt",
+        "sha256": "40402d4fd43e5888a8c170f9abc69e5791fb0e754aaed01446016570159e2c34",
+        "role": "full",
+        "derived_from": {
+          "uri": "/opt/hyperkalemia/model_12_lead.pt",
+          "sha256": "26800a8757bb3c7e74d96a41af86a3f6cd5f1bed3827f14e621df29df1096342",
+          "by": "mival_wrap_potassium.fit_kardionet_stats on 1,000 MIMIC ECGs (mimic_sample_1000.npy sha256 51876148ba3cce192ff44f2c42c52aa488f18a3eda19ddaa409e7b43b4c8a622)"
+        }
+      }
+    ],
+    "weights_format": "state_dict",
+    "builder": {
+      "module": "mival_wrap_potassium:KardioNet12Lead",
+      "kwargs": {}
+    },
+    "code_path": "${MIVAL_HOME}/miva/registry/wrappers",
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "III",
+        "aVR",
+        "aVL",
+        "aVF",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 500,
+      "duration_s": 10,
+      "unit": "mV",
+      "filters": [],
+      "scaling": "none",
+      "layout": "lead_time",
+      "dtype": "float32"
+    },
+    "output": {
+      "type": "regression",
+      "n_outputs": 1,
+      "value_index": 0,
+      "unit": "mEq/L"
+    },
+    "pretraining_corpora": [
+      "cedars-sinai"
+    ],
+    "code_commit": "7eaab56d7247ac6b5cf5c66f17b269197416e06e",
+    "notes": "Lead-wise z-score uses target-cohort statistics (L2-2); fitted once on 1,000 MIMIC ECGs (the ecg-age sample, one per person) after the authors' baseline removal and wavelet denoising, and stored as buffers. The 12-lead pipeline is undocumented; the single-lead preprocessing is assumed to carry over. Whether the 12-lead checkpoint is the general or the dialysis fine-tune is not stated. Output assumed mEq/L (MSE on raw values). MIT. Needs pywavelets and xmltodict in the env."
+  }
+}

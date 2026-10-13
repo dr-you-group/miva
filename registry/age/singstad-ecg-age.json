@@ -1,0 +1,86 @@
+{
+  "model_id": "singstad-ecg-age",
+  "Name": "Singstad ECG-age InceptionTime (both sexes)",
+  "Summary": "Age in years from a 12-lead ECG at 100 Hz.",
+  "Link": "https://github.com/Bsingstad/ECG-age",
+  "Descriptors": {
+    "Version": "model_weights_inception_both genders.h5",
+    "References": [
+      "doi:10.1101/2022.10.03.22280640"
+    ]
+  },
+  "Model properties": {
+    "Input": "12-lead, 100 Hz, 1000 x 12, raw uV truncated to int32"
+  },
+  "Imaging": {
+    "Modality": "ECG"
+  },
+  "x-mival": {
+    "adapter": "keras",
+    "feature_layer": null,
+    "threshold": {},
+    "training_modes_supported": [
+      "inference_only"
+    ],
+    "ensemble": {
+      "method": "none",
+      "members": 1
+    },
+    "weights": [
+      {
+        "uri": "${MIVAL_HOME}/models/singstad-ecg-age/model_weights_inception_both genders.h5",
+        "sha256": "f9cd1fe51463e4841a548fe9a0cf05dcbee9d1830341bd44c2409faaa1808efd",
+        "role": "full"
+      }
+    ],
+    "weights_format": "keras_weights",
+    "builder": {
+      "module": "mival_wrap_singstad:build",
+      "kwargs": {}
+    },
+    "code_path": "${MIVAL_HOME}/miva/registry/wrappers",
+    "input_contract": {
+      "leads": [
+        "I",
+        "II",
+        "III",
+        "aVR",
+        "aVL",
+        "aVF",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6"
+      ],
+      "sampling_rate_hz": 100,
+      "duration_s": 10,
+      "unit": "uV",
+      "filters": [],
+      "scaling": "none",
+      "layout": "time_lead",
+      "dtype": "float32"
+    },
+    "output": {
+      "type": "regression",
+      "n_outputs": 1,
+      "value_index": 0,
+      "unit": "years"
+    },
+    "runtime": {
+      "framework": "tensorflow-cpu==2.7.4, keras==2.7.0",
+      "python": "3.9.25",
+      "device": "cpu",
+      "env": "${MIVAL_HOME}/envs/mival-keras27",
+      "returns": [
+        "logits"
+      ]
+    },
+    "pretraining_corpora": [
+      "physionet-2021"
+    ],
+    "code_commit": "3f60dbfa7782fe4599dac1eb44c2b06d2c16a7fb",
+    "notes": "Weights only; architecture from the authors' build_model((1000, 12), 1) (InceptionTime). Inputs were raw PhysioNet 2021 digital values (uV) cast to int32 by pad_sequences; the wrapper truncates the same way. Resampled with scipy.signal.resample in the notebook; the framework's resampler is used here. No license file. Keras 2.7 env (CPU)."
+  }
+}

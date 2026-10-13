@@ -1,0 +1,57 @@
+study_id: lvef
+site_config: ${MIVAL_HOME}/config/site.yaml  # 기관 설정 (site, DB, schema, DICOM 경로). README 4.2
+seed: 20260921
+
+stages:
+  retrieve:
+    label_concept_id: 3027172
+    window_days: 7
+    window_days_sens2: 30
+    implausible_below: null  # LVEF 값으로 제외하지 않음 (null = 하한 없음)
+    primary_cutoff: 40
+    sens1_cutoff: 50
+    require_local_file: true
+    ecg_selection: {per_person: all}
+
+  profile:
+    test_fraction: 0.2
+    n_folds: 5
+    stratify_on: label_primary
+    min_test_positives: 100
+
+  preprocess:
+    loader: dicom
+    registry: registry/models
+    allow_upsample: false
+    pad_policy: reject
+    # perturbation.axes is study-wide: one grid degrades every card in
+    # `registry` (see check_grid_against_contract in perturbation.py), but
+    # this study's four cards run at 500, 250 and 100 Hz, all at 10 s. No
+    # single set of degrading resample/duration levels stays below every
+    # card's own contract rate/duration, so a baseline-only level is used for
+    # both axes instead: the checker treats a level equal to the axis's own
+    # baseline as the identity (it only warns when the baseline is set above
+    # a card's contract, never when it matches). lead_dropout and
+    # amplitude_scale are unaffected by rate/duration and keep their
+    # framework defaults.
+    perturbation:
+      axes:
+        resample: [500]
+        duration: [10]
+
+  models:
+    registry: registry/models
+    batch_size: 64
+    arms:
+      - {model_id: heartwise-lvef-binary, training_mode: inference_only, label_def: primary}
+      - {model_id: heartwise-lvef-regression, training_mode: inference_only, label_def: value}
+      - {model_id: ecgfounder, training_mode: linear_probe, label_def: primary, hparam_grid: {lr: [0.01, 0.001]}}
+      - {model_id: ecgfounder, training_mode: linear_probe, label_def: value, hparam_grid: {lr: [0.01, 0.001]}}
+      - {model_id: xecg, training_mode: linear_probe, label_def: primary, hparam_grid: {lr: [0.01, 0.001]}}
+      - {model_id: xecg, training_mode: linear_probe, label_def: value, hparam_grid: {lr: [0.01, 0.001]}}
+
+  evaluate:
+    outcomes: {primary: null}
+    regression_cuts: [40]
+    bootstrap_replicates: 2000
+    figures: true

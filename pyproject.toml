@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mival"
+version = "0.1.0"
+description = "MI-VAL: model-agnostic ECG validation framework on OMOP MI-CDM"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21", "scipy>=1.7", "jsonschema>=4.0", "pyyaml>=5.4"]
+
+[project.optional-dependencies]
+# Table I/O is optional at import time: mival.pipeline must import in the
+# Python 3.9 Keras 2.7 environment even where pyarrow is unavailable.
+tables = ["pandas>=1.3", "pyarrow>=8"]
+# Same rule as `tables`: AUROC/AUPRC come from scikit-learn and figures from
+# matplotlib, but neither may be imported at module scope — the model
+# environments carry a backend and little else, and `import mival` has to work
+# there. Both are imported inside the functions that need them.
+metrics = ["scikit-learn>=1.0"]
+figures = ["matplotlib>=3.4"]
+# The retrieve stage's default query path (mival.stages.retrieve.query_postgres)
+# needs this; the injected-query path used by tests and by other stages does not.
+db = ["psycopg[binary]>=3.1"]
+# retrieve.dbms: sqlserver. pymssql wheels bundle FreeTDS, so no system ODBC
+# driver is needed on an offline server.
+mssql = ["pymssql>=2.2"]
+# The real cohort's records are DICOM (12-lead ECG Waveform Storage);
+# mival.stages.preprocess.load_dicom_record imports pydicom inside the
+# function, same rule as `tables` and `metrics`.
+dicom = ["pydicom>=3.0"]
+
+[project.scripts]
+mival = "mival.pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mival = ["stages/sql/*.sql"]
+
