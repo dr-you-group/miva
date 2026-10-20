@@ -77,7 +77,7 @@ class RunsRecord:
         self._write()
 
     def _write(self) -> None:
-        self.path.write_text(json.dumps(self.runs, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self.path.write_bytes((json.dumps(self.runs, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
 def artifact(run_dir: str, name: str) -> Path:
@@ -241,7 +241,7 @@ def merge_train_logs(run_dirs: Sequence[str], target: Path) -> Path:
         path = artifact(run_dir, "train_log.jsonl")
         if path.is_file():
             lines.extend(line for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    target.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    target.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
     return target
 
 

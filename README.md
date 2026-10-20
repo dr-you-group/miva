@@ -51,45 +51,107 @@ MI-CDM ─▶ retrieve ─▶ profile ─▶ preprocess ─▶ describe ─▶ m
 | 항목 | 조건 |
 |---|---|
 | OS | Linux x86_64 (Ubuntu 22.04 등) 또는 Windows Server 2022 (Docker 없이 직접 실행). 실행 진입점은 두 OS에서 같은 Python 코드를 부른다 (`.sh`와 `.cmd`는 인터프리터만 찾는다). 차이는 아래 6절. |
-| conda | env 압축을 풀고 `conda-unpack`을 실행하는 데만 쓴다 (Miniconda/Anaconda 무관). |
+| Python, conda | 설치하지 않는다. env 3개는 python-build-standalone CPython에 패키지를 미리 설치한 폴더라서 번들을 풀면 바로 돈다 (`envs/<env>/bin/python`, Windows는 `envs\<env>\python.exe`). 서버에 이미 있는 Python이나 conda와 섞이지 않는다. |
 | GPU | 선택. NVIDIA GPU와 드라이버가 있으면 torch 모델이 GPU로 돈다. 없으면 CPU로 돌고, **xECG만 제외된다** (아래 6절). 여러 장이면 `site.yaml`의 `gpus`에 번호를 적는다 (4.2절). |
+| GPU 드라이버 | `mival-torch`는 torch 2.13.0+cu130이라 **CUDA 13.0 이상**을 지원하는 드라이버(Linux 580 이상)가 필요하다. `mival-xecg`는 torch 2.8.0+cu128이라 CUDA 12.8 이상이면 된다. CUDA toolkit(`nvcc`)과 컴파일러는 Linux·Windows 모두 필요 없다. 드라이버가 낮으면 check_bundle이 문제로 센다 (5절). |
 | DB | MI-CDM이 적재된 **PostgreSQL** 또는 **SQL Server (MSSQL)**. `image_occurrence`, `person`, `measurement`, `death`, `visit_occurrence`를 읽기만 한다. 드라이버(psycopg, pymssql)는 env에 들어 있어 ODBC 드라이버 설치가 필요 없다. |
 | DICOM | `image_occurrence.local_path`가 가리키는 12-lead ECG DICOM 파일이 서버에서 읽을 수 있는 위치에 있어야 한다. |
 | 인터넷 | 필요 없다. 실행에 필요한 env, 가중치, 모델 코드가 모두 번들에 들어 있다. |
-| 디스크 | 번들 (크기는 번들 제작 후 기입) + 실행 결과. 변환된 파형 텐서가 큰 study는 수십~100 GB를 쓴다 (`MIVAL_RUNS`로 위치 지정). |
+| 디스크 | 번들 archive(Linux 약 8.0 GiB, Windows 약 6.7 GiB)와 푼 폴더(Linux 15 GB, Windows 14 GB). 설치가 끝나면 archive는 지워도 된다. 그리고 실행 결과: 변환된 파형 텐서가 큰 study는 수십~100 GB를 쓴다 (`MIVAL_RUNS`로 위치 지정). |
 
 ## 3. 설치 (내부망 반입 번들)
 
-반입 번들 `miva-bundle-261013.tar.gz`를 풀면 아래 구조가 된다. 이 폴더가 `MIVAL_HOME`이다.
+반입 번들은 OS마다 하나이고, 옆에 sha256 파일이 있다.
+
+| OS | 파일 | 크기 | 풀면 |
+|---|---|---|---|
+| Linux | `miva-bundle-<날짜>-linux-x86_64.tar.gz` (+ `.sha256`) | 약 8.0 GiB | 15 GB, 파일 84,240개 |
+| Windows | `miva-bundle-<날짜>-windows-x86_64.tar.gz` (+ `.sha256`) | 약 6.7 GiB | 14 GB, 파일 81,288개 |
+
+archive의 최상위 폴더가 `mival/`이다. 이 폴더가 `MIVAL_HOME`이다. env는 이미 풀린 폴더로 들어 있어서
+따로 풀거나 후처리할 것이 없다.
 
 ```
-$MIVAL_HOME/
-├── miva/         이 저장소
-├── envs/         conda-pack env 압축 3개
-│   ├── mival-torch.tar.gz     torch (CUDA 빌드, GPU 없으면 CPU로 동작). retrieve·profile·preprocess·evaluate와 torch 모델 7개
-│   ├── mival-keras27.tar.gz   TensorFlow/Keras 2.7 (CPU). singstad-ecg-age
-│   └── mival-xecg.tar.gz      xECG 전용 (GPU 필요, 커널 미리 컴파일됨)
-├── models/       가중치 (카드의 weights.uri 위치 그대로)
-├── code/         저자 공개 코드 (카드의 code_path 위치 그대로)
-├── cache/        xECG 컴파일된 커널
-├── config/       micdm.env, site.yaml (기관에서 만든다, 4절)
-└── SHA256SUMS
+$MIVAL_HOME/   (= mival/)
+├── miva/              이 저장소 (번들을 만든 commit, BUNDLE.txt에 기록)
+├── envs/              실행 env 3개 (python-build-standalone 폴더, 8절)
+│   ├── mival-torch/     torch (CUDA 빌드, GPU 없으면 CPU로 동작). retrieve·profile·preprocess·evaluate와 torch 모델 7개
+│   ├── mival-keras27/   TensorFlow/Keras 2.7 (CPU). singstad-ecg-age
+│   └── mival-xecg/      xECG 전용 (GPU 필요)
+├── models/            가중치 (카드의 weights.uri 위치 그대로)
+├── code/              저자 공개 코드 (카드의 code_path, wrapper가 읽는 위치)
+├── cache/             xECG 미리 컴파일된 커널 (Linux 번들만, 6절)
+├── config/            micdm.env, site.yaml (기관에서 만든다, 4절)
+├── BUNDLE.txt         번들 정보: miva commit, env별 Python과 lock, 커널 빌드 값
+├── BUNDLE-FILES.json  카드마다 들어간 파일과 그 이유
+└── SHA256SUMS         번들의 모든 파일 sha256
 ```
+
+**Linux**
 
 ```bash
-# 1) 압축 해제 (경로는 기관 사정에 맞게)
-mkdir -p /opt/mival && tar -xzf miva-bundle-261013.tar.gz -C /opt/mival
-export MIVAL_HOME=/opt/mival            # 셸 설정(~/.bashrc 등)에 넣어 둔다
-cd $MIVAL_HOME && sha256sum -c SHA256SUMS
+# 1) archive 확인 (archive와 .sha256이 있는 폴더에서). "OK"가 나와야 한다
+sha256sum -c miva-bundle-<날짜>-linux-x86_64.tar.gz.sha256
 
-# 2) env 3개 풀기 (CXR 나이예측 모델과 같은 conda-pack 방식)
-for e in mival-torch mival-keras27 mival-xecg; do
-  mkdir -p envs/$e && tar -xzf envs/$e.tar.gz -C envs/$e
-  envs/$e/bin/conda-unpack
-done
+# 2) 풀기. /opt 아래에 풀면 /opt/mival이 된다 (다른 경로도 된다. 참조 서버에서 1분 30초)
+tar -xzf miva-bundle-<날짜>-linux-x86_64.tar.gz -C /opt
+export MIVAL_HOME=/opt/mival            # 셸 설정(~/.bashrc 등)에 넣어 둔다
+
+# 3) 파일 확인. 아무것도 찍히지 않으면 정상
+cd $MIVAL_HOME && sha256sum -c --quiet SHA256SUMS
 ```
 
-GPU가 없는 서버는 `mival-xecg`를 풀지 않아도 된다.
+GPU가 없는 서버도 `envs/mival-xecg`를 지울 필요는 없다(xECG arm은 건너뛴다, 6절).
+
+**Windows (PowerShell)**
+
+경로 길이 때문에 `C:\mival`처럼 **짧은 경로**에 설치한다 (5절 "Windows 긴 경로"). Windows Server 2022 기본 `tar`로 풀린다.
+
+```powershell
+# 1) archive 확인: Hash 값이 .sha256 파일의 첫 칸과 같아야 한다 (대소문자만 다름)
+Get-FileHash .\miva-bundle-<날짜>-windows-x86_64.tar.gz -Algorithm SHA256
+Get-Content .\miva-bundle-<날짜>-windows-x86_64.tar.gz.sha256
+
+# 2) 풀기. C:\ 에 풀면 C:\mival이 된다
+tar -xzf .\miva-bundle-<날짜>-windows-x86_64.tar.gz -C C:\
+setx MIVAL_HOME C:\mival                # 새로 여는 창부터 적용된다
+$env:MIVAL_HOME = "C:\mival"            # 지금 창
+
+# 3) 파일 확인 (Windows에는 sha256sum이 없어 번들의 Python으로 한다). 마지막 줄이 "81288 files, 0 failed"
+cd C:\mival
+@'
+import hashlib
+bad = n = 0
+for line in open("SHA256SUMS", encoding="utf-8"):
+    digest, name = line.rstrip("\n").split("  ", 1)
+    n += 1
+    try:
+        h = hashlib.sha256()
+        with open(name, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        ok = h.hexdigest() == digest
+    except OSError:
+        ok = False
+    if not ok:
+        bad += 1
+        print("FAILED", name)
+print(n, "files,", bad, "failed")
+'@ | .\envs\mival-torch\python.exe -
+```
+
+- **백신(Windows Defender) 실시간 검사**가 켜져 있으면 느리다. 확인 서버(vCPU 4개, Defender 켬)에서 풀기에 약 6분,
+  3)의 파일 확인에 12~25분이 걸렸다. 검사를 끄라는 뜻은 아니고, 멈춘 것이 아니니 기다리면 된다.
+- 셸은 cmd를 써도 된다. 6절의 실행 명령은 cmd 기준이다.
+
+**Windows 번들에서 확인한 것과 아직 확인하지 못한 것.** 이 Windows 번들은 AWS의 Windows Server 2022 + NVIDIA L4(24 GB 1장,
+driver 582.16, CUDA 13.0, CUDA toolkit 없음)에서 풀기, SHA256SUMS, check_bundle, 모델 10개의 예측(참조 실행과 비교),
+preprocess, evaluate(`workers: 4`), export까지 확인했다. 다음은 아직 확인하지 못했고 보라매 첫 실행에서 처음 확인된다:
+
+- 실제 드라이버 595(CUDA 13.2)
+- 48 GB GPU 2장(`gpus: [0, 1]`)으로 arm을 나눠 돌리기
+- models 단계 전체 실행 (확인은 모델마다 test 512건 forward로 했다)
+- 실제 DB 접속 (DB 드라이버 import까지만 확인)
 
 ## 4. 기관 설정
 
@@ -264,10 +326,32 @@ evaluate는 지표·곡선·bootstrap 계산을 여러 CPU 프로세스로 나�
 
 ### xECG 커널 (Linux)
 
-xECG의 sLSTM은 CUDA 커널을 쓴다. 번들의 `cache/torch_extensions`에는 **미리 컴파일된 커널**이 있는데,
-번들을 만들 때와 **같은 절대 경로**에 풀었을 때만 그대로 쓰인다. 다른 경로에 풀면 첫 실행에서
-다시 컴파일하므로 `nvcc`(CUDA toolkit)와 **gcc 14 이하**가 필요하다. 없으면 models [mival-xecg]가 실패한다.
-Windows에서는 위 5절처럼 컴파일 없는 구현으로 돌므로 이 조건이 필요 없다.
+xECG의 sLSTM은 CUDA 커널을 쓴다. Linux 번들의 `cache/torch_extensions`에 **미리 컴파일한 커널**이 있고,
+xecg 카드의 `x-mival.runtime.prebuilt_torch_extensions: true`에 따라 엔진이 이 파일을 컴파일 없이 바로 불러온다.
+
+- **어느 경로에 풀어도 된다.** 다시 컴파일하지 않으므로 `nvcc`(CUDA toolkit)와 gcc가 필요 없다. 참조 서버에서
+  `/opt/mival`이 아닌 경로에 풀고 CUDA toolkit과 gcc를 가린 채로 돌려, 예측이 참조 실행과 비트 단위로 같은 것을 확인했다.
+- 커널은 `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"`로 만들었다: sm_80·sm_86·sm_89용 기계어와 compute_89 PTX.
+  48 GB 카드의 두 세대(Ampere 8.6, 예: RTX A6000 / Ada 8.9, 예: L40·L40S·RTX 6000 Ada)는 그대로 돈다.
+  드라이버는 CUDA 12.8 이상이면 된다(`mival-xecg`의 torch cu128과 같은 조건).
+- 불러온 커널의 이름과 sha256은 models 단계 기록(`train_log.jsonl`의 `prebuilt_torch_extensions`)과 반출 묶음
+  `export_manifest.json` `arms[].prebuilt_torch_extensions`에 남는다. check_bundle의 xecg 줄에도
+  `info: prebuilt torch extension(s) ...`로 나온다.
+
+**커널을 쓸 수 없을 때 (대안).** 그 GPU에서 이 커널이 돌지 않으면(arch가 맞지 않는 등) Windows와 같은 컴파일 없는
+구현(sLSTM `vanilla` backend)을 Linux에서도 쓸 수 있다.
+
+```bash
+export MIVAL_RUNTIME_PLATFORM=win32     # 이 셸에서 run_study.sh를 실행 (xECG만 영향)
+scripts/run_study.sh lvef
+```
+
+카드의 `runtime.windows` 설정이 적용되어 가중치를 vanilla 배열로 바꿔 읽는다. 참조 서버에서 두 구현의 feature cosine
+유사도는 최소 0.99985였고, LVEF xECG probe의 AUROC·MAE는 소수 넷째 자리까지 같았다(test 512건 예측 차이: LVEF 값
+최대 0.12 %p, 확률 최대 0.005). 대신 xECG backbone이 약 12배 느리다. models manifest와 `export_manifest.json`의 arm 기록에
+`runtime_override: windows`, `runtime_platform: win32`가 남으므로 연구실에서 구분된다. 이 방법을 썼다면 회신할 때 알려 준다.
+
+**Windows는 항상 vanilla 구현으로 돈다** (5절). 커널이 들어 있지 않고 위 조건도 필요 없다.
 
 ### 소요 시간
 
@@ -478,25 +562,37 @@ $MIVAL_HOME/results-<site>-<YYMMDD>.zip   export_results가 만드는 회신 파
 ### 반입 번들에만 있는 것 (GitHub에는 없음)
 
 ```
-envs/mival-torch.tar.gz           conda-pack env: Python 3.10, torch (CUDA), pydicom, psycopg, pymssql 등
-envs/mival-keras27.tar.gz         conda-pack env: Python 3.9, TensorFlow/Keras 2.7 (CPU)
-envs/mival-xecg.tar.gz            conda-pack env: Python 3.12, torch 2.8 (CUDA), xlstm
+envs/                             python-build-standalone CPython에 lock 파일 버전 그대로 패키지를 설치한 폴더
+  mival-torch/                      Python 3.10.20, torch 2.13.0+cu130, pydicom, psycopg, pymssql 등
+  mival-keras27/                    Python 3.9.25, tensorflow-cpu 2.7.4
+  mival-xecg/                       Python 3.12.13, torch 2.8.0+cu128, xlstm 2.0.4
+                                    (각 폴더의 MIVAL-ENV.txt: Python 버전과 lock sha256)
 models/                           가중치 (카드의 weights.uri), 아래 목록
   heartwise-lvef/                   lvef_under_equal_40.pt, LVEF_MSE_SL.pt
   ecgfounder/                       12_lead_ECGFounder.pth
-  xecg/                             model.safetensors, config.json, xECG.py
+  xecg/                             model.safetensors, config.json, xECG.py, downstream_models.py
   lima-ecg-age/model/               model.pth
   singstad-ecg-age/                 model_weights_inception_both genders.h5
   cavalab-deepsurv-code15/          mival_state_dict.pt
   cavalab-mtlr-code15/              mival_state_dict.pt
   kardionet-k-12lead/               mival_state_dict.pt
   vonbachmann-k/regression_models/potassium/model_{0..4}/model.pth
-code/                             저자 공개 코드 (카드의 code_path, wrapper가 읽는 위치)
+code/                             저자 공개 코드 (카드의 code_path, wrapper가 읽는 위치. .git 제외)
   ecgfounder/  deepecg-docker/  ecg-age-prediction/  ECG-age/
   ecg-survival-benchmark/  hyperkalemia/  ecg-electrolyte-regression/
-cache/torch_extensions/           xECG 컴파일된 CUDA 커널
-SHA256SUMS
+cache/torch_extensions/           xECG sLSTM 커널 (Linux 번들만, 6절)
+BUNDLE.txt                        플랫폼, 만든 시각, miva commit, mival source_sha256, env별 Python·lock sha256, 커널 빌드 값
+BUNDLE-FILES.json                 카드마다 들어간 파일, 카드의 어느 키나 wrapper가 읽는지, 크기
+SHA256SUMS                        자기 자신 말고 모든 파일 (3절)
 ```
+
+| | Linux | Windows |
+|---|---|---|
+| archive (tar.gz) | 약 8.0 GiB | 약 6.7 GiB |
+| 푼 크기 | 15 GB, 파일 84,240개 | 14 GB, 파일 81,288개 |
+| `envs/` (torch / keras27 / xecg) | 5.2 / 1.3 / 7.1 GB | 3.3 / 1.4 / 7.6 GB |
+| `models/`, `code/` | 1.2 GB, 67 MB | 1.2 GB, 67 MB |
+| `cache/torch_extensions` | 5 MB | 없음 |
 
 ## 9. 문제 해결
 
@@ -509,7 +605,7 @@ SHA256SUMS
 | retrieve에서 ECG가 0건 | site.yaml의 `dbms`, `schema`, `modality_concept_id`, `local_path_root`와 local_path가 이 서버에서 열리는지 (4.2절) |
 | DB 접속 실패 | `micdm.env`의 키 이름과 값 (값 뒤 주석 금지), 방화벽, SQL Server는 TCP/IP 활성화와 포트 1433 |
 | `min_test_positives` 오류로 profile 실패 | test 양성 수가 100건 미만. 코호트 규모 문제이므로 연구실에 알린다 |
-| models [mival-xecg] 실패 | GPU, 드라이버. GPU가 없으면 정상적으로 건너뛴다. Linux에서 번들 제작 때와 다른 경로에 풀었다면 커널을 다시 컴파일하므로 `nvcc`와 gcc 14 이하가 필요하다 (6절) |
+| models [mival-xecg] 실패 | GPU, 드라이버(CUDA 12.8 이상). GPU가 없으면 정상적으로 건너뛴다. Linux에서 커널이 그 GPU에서 돌지 않으면 `MIVAL_RUNTIME_PLATFORM=win32`로 컴파일 없는 구현을 쓴다 (6절) |
 | Windows에서 `check_bundle`에 `runtime.windows override applies` 줄이 나옴 | 정상이다 (5절). 문제로 세지 않는다 |
 | Windows에서 `check_bundle`이 경로 260자를 지적 | `LongPathsEnabled`를 켜거나 `C:\mival` 같은 짧은 경로에 설치 (5절) |
 | 서버 메모리 부족 (models 단계) | `MIVAL_FEATURE_CACHE_MAX_GB`를 줄이거나 `MIVAL_FEATURE_CACHE=0` (6절) |

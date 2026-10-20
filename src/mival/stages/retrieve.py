@@ -269,7 +269,7 @@ class RetrieveStage(Stage):
         if spec.label_kind == "death_within":
             payload["events"] = int(kept["label_event"].sum())
         summary_path = ctx.layout.artifact(SUMMARY)
-        summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        summary_path.write_bytes(json.dumps(payload, indent=2).encode("utf-8"))
         return StageResult(outputs=[index_path, summary_path, attributes_path, sql_path],
                            counts={"in": len(frame), "out": len(kept)})
 
@@ -512,7 +512,7 @@ def write_sql(ctx: StageContext, sql: str, params: Mapping[str, Any], name: str)
         filled = filled.replace(f"%({key})s", str(value))
     path = ctx.layout.artifact(SQL_DIR, f"{name}.sql")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(filled, encoding="utf-8")
+    path.write_bytes(filled.encode("utf-8"))
     return path
 
 
@@ -535,7 +535,7 @@ def write_summary(ctx: StageContext, spec: RetrieveSpec, frame, kept, snapshot: 
     if positives:
         payload["positives"] = positives
     path = ctx.layout.artifact(SUMMARY)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_bytes(json.dumps(payload, indent=2).encode("utf-8"))
     return path
 
 

@@ -227,8 +227,8 @@ def plan_arms(study_path: Path, out: Path) -> List[Arm]:
 def env_path(python: Path, current: str) -> str:
     """``current`` PATH behind the directories an activated env puts first.
 
-    POSIX: the interpreter's ``bin``. A Windows conda env keeps ``python.exe``
-    at its root and its tools in ``Library\\bin`` and ``Scripts``.
+    POSIX: the interpreter's ``bin``. A Windows env keeps ``python.exe`` at its
+    root and its tools in ``Scripts`` (and, in a conda env, ``Library\\bin``).
     """
     root = Path(python).parent
     dirs = [root] + [d for d in (root / "Library" / "bin", root / "Scripts") if d.is_dir()]

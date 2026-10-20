@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
+from mival.adapters._prebuilt import prebuilt_extensions
+from mival.adapters._prebuilt import record as prebuilt_record
 from mival.adapters._attribution import (
     DEFAULT_STEPS,
     integration_points,
@@ -347,11 +349,16 @@ class TorchAdapter(Adapter):
         import torch
 
         _validate_returns(card)
-        module = _build_with_ensemble(card)
+        with prebuilt_extensions(card):
+            module = _build_with_ensemble(card)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         return TorchHandle(
             module=module.to(device).eval(), device=device, card=card, backbone_as_published=True
         )
+
+    def runtime_record(self, card: ModelCard) -> Dict[str, Any]:
+        """What this process did at load beyond the card as written (prebuilt torch extensions)."""
+        return prebuilt_record(card)
 
     def features(self, handle: TorchHandle, batch: np.ndarray, index: int = 0) -> np.ndarray:
         import torch

@@ -92,9 +92,30 @@ def _source_digest() -> Optional[str]:
     actually ran. Hashing the source files is available in every deployment and
     changes exactly when the code does.
     """
-    root = Path(__file__).resolve().parent.parent
+    return tree_digest(Path(__file__).resolve().parent.parent)
+
+
+def _digest_name(relative) -> str:
+    """A file's name in the digest: ``/``-joined, so the value is the same on every OS."""
+    return "/".join(relative.parts)
+
+
+def _digest_order(relative):
+    """Sort key of the digest: the parts as written (POSIX ``Path`` order; Windows
+    paths would otherwise compare case-insensitively)."""
+    return tuple(relative.parts)
+
+
+def tree_digest(root: Path) -> Optional[str]:
+    """sha256 over every ``*.py`` under ``root``: name, NUL, sha256 of the bytes, in order.
+
+    Names and order come from the path parts, not ``str(path)``, so a Windows
+    site records the same ``code.source_sha256`` as Linux for the same tree
+    (before, ``str`` gave ``mival\\stages\\...`` there). On POSIX the value is
+    unchanged.
+    """
     try:
-        parts = sorted(root.rglob("*.py"))
+        parts = sorted((p.relative_to(root) for p in root.rglob("*.py")), key=_digest_order)
     except OSError:  # pragma: no cover - unreadable install
         return None
     if not parts:  # pragma: no cover - zipped install
@@ -102,10 +123,10 @@ def _source_digest() -> Optional[str]:
     digest = hashlib.sha256()
     for part in parts:
         try:
-            body = part.read_bytes()
+            body = (root / part).read_bytes()
         except OSError:  # pragma: no cover - unreadable file
             return None
-        digest.update(str(part.relative_to(root)).encode("utf-8"))
+        digest.update(_digest_name(part).encode("utf-8"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(body).digest())
     return digest.hexdigest()
@@ -245,7 +266,7 @@ class RunManifest:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = target.with_name(target.name + ".tmp")
-        temp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        temp.write_bytes(json.dumps(self.to_dict(), indent=2, ensure_ascii=False).encode("utf-8"))
         os.replace(temp, target)
         return target
 

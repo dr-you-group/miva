@@ -990,6 +990,9 @@ class ModelsStage(Stage):
                 # Only when a platform override was applied, so a run without
                 # one writes the same record as before overrides existed.
                 **({"runtime_override": dict(card.runtime_override)} if card.runtime_override else {}),
+                # What loading did beyond the card as written (e.g. a prebuilt
+                # torch extension), only when the adapter reports something.
+                **_runtime_record(adapter, card),
             },
             "training": training,
             # What pred_value/prob is on, and for a survival card the horizon
@@ -1190,6 +1193,13 @@ def _persist_heads(
     return path
 
 
+def _runtime_record(adapter: Any, card: ModelCard) -> Dict[str, Any]:
+    """The adapter's ``runtime_record(card)`` (what its load did here), or nothing."""
+    hook = getattr(adapter, "runtime_record", None)
+    found = hook(card) if callable(hook) else None
+    return dict(found) if found else {}
+
+
 def _registry_files(directory: Path) -> Dict[str, Path]:
     """Card paths keyed for the config_hash, or nothing if the path is unusable.
 
@@ -1378,7 +1388,7 @@ def _logits(probs: np.ndarray) -> List[Optional[float]]:
 
 def _write_train_log(path: Path, entries: Sequence[Mapping[str, Any]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
         for entry in entries:
             handle.write(json.dumps(entry, ensure_ascii=False, default=_jsonable) + "\n")
     return path

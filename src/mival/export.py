@@ -2057,16 +2057,21 @@ def _read_json(path: Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _write_json(path: Path, body: Any) -> Path:
+def _write_text(path: Path, text: str) -> Path:
+    """UTF-8 with ``\\n`` line ends on every OS: a Windows site's zip has the same bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, indent=2, ensure_ascii=False, default=str) + "\n",
-                    encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return path
+
+
+def _write_json(path: Path, body: Any) -> Path:
+    return _write_text(path, json.dumps(body, indent=2, ensure_ascii=False, default=str) + "\n")
 
 
 def _write_csv(path: Path, frame) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False)
+    # pandas ends lines with os.linesep by default (CRLF on Windows).
+    frame.to_csv(path, index=False, lineterminator="\n")
     return path
 
 
@@ -2407,9 +2412,12 @@ def runtime_overrides(study, models_dirs: Sequence[Path]) -> List[Dict[str, Any]
     has a train_log entry for the arm, so None there means "not known", not
     "none applied". Only the override's name and platform leave, and the name
     of the state-dict transform it declared (``state_dict_transform``, else
-    None); its list of changes stays in the train_log.
+    None); its list of changes stays in the train_log. ``prebuilt_torch_extensions``
+    names the torch extensions the arm loaded prebuilt (``model_card.
+    prebuilt_torch_extensions``; None when none were), without file paths.
     """
     found: Dict[Tuple[str, str, str], Optional[Dict[str, Any]]] = {}
+    prebuilt: Dict[Tuple[str, str, str], List[str]] = {}
     for run_dir in models_dirs:
         path = _artifact(run_dir, "train_log.jsonl")
         if not path.is_file():
@@ -2424,6 +2432,11 @@ def runtime_overrides(study, models_dirs: Sequence[Path]) -> List[Dict[str, Any]
             key = (str(entry.get("model_id")), str(entry.get("training_mode")),
                    str(entry.get("label_def")))
             override = (entry.get("model_card") or {}).get("runtime_override")
+            names = [str(e.get("name")) for e in
+                     ((entry.get("model_card") or {}).get("prebuilt_torch_extensions") or {}).get("extensions") or []
+                     if isinstance(e, dict)]
+            if names:
+                prebuilt[key] = sorted(set(prebuilt.get(key, []) + names))
             if override:
                 transform = override.get("state_dict_transform")
                 found[key] = {"name": str(override.get("name")),
@@ -2439,7 +2452,8 @@ def runtime_overrides(study, models_dirs: Sequence[Path]) -> List[Dict[str, Any]
                      "recorded": key in found,
                      "runtime_override": None if override is None else override["name"],
                      "runtime_platform": None if override is None else override["platform"],
-                     "state_dict_transform": None if override is None else override["state_dict_transform"]})
+                     "state_dict_transform": None if override is None else override["state_dict_transform"],
+                     "prebuilt_torch_extensions": prebuilt.get(key) or None})
     return arms
 
 
@@ -2793,15 +2807,15 @@ def build_bundle(studies: Sequence[str], study_root: Path, runs_root: Path, home
 
         from mival.reporting import methods_draft, tripod_checklist
 
-        bundle.path("reporting/methods_draft.md").write_text(
-            methods_draft([by_study[s.study_id] for s in loaded]), encoding="utf-8")
+        _write_text(bundle.path("reporting/methods_draft.md"),
+                    methods_draft([by_study[s.study_id] for s in loaded]))
         # The checklist and README list the bundle's files, themselves included.
         checklist = bundle.path("reporting/tripod_ai_checklist.md")
         readme = bundle.path("README.md")
-        checklist.write_text("", encoding="utf-8")
-        readme.write_text("", encoding="utf-8")
-        checklist.write_text(tripod_checklist(bundle.files()), encoding="utf-8")
-        readme.write_text(_readme(bundle, site, by_study, min_cells), encoding="utf-8")
+        _write_text(checklist, "")
+        _write_text(readme, "")
+        _write_text(checklist, tripod_checklist(bundle.files()))
+        _write_text(readme, _readme(bundle, site, by_study, min_cells))
 
         names = bundle.files()
         stray = [n for n in names if not any(re.fullmatch(p, n) for p in ALLOWLIST)]

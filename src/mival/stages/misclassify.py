@@ -1116,7 +1116,7 @@ def _write_unmatched(unmatched: Sequence[Mapping[str, Any]], ctx: StageContext) 
 
 def _write_json(path: Path, body: Mapping[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.write_bytes(json.dumps(body, indent=2, sort_keys=True, default=str).encode("utf-8"))
     return path
 
 

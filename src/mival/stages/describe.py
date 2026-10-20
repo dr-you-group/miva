@@ -102,13 +102,13 @@ class DescribeStage(Stage):
 
         table = table1(cohort, attributes, split, spec.outcome)
         table1_path = ctx.layout.artifact(TABLE1_LONG)
-        table.to_csv(table1_path, index=False)
+        table.to_csv(table1_path, index=False, lineterminator="\n")
 
         runs = load_runs(ctx.inputs[RUNS_INPUT]) if RUNS_INPUT in ctx.inputs else None
         ledger = read_exclusions(exclusions_root(ctx.layout.runs_root, ctx.study_id), runs)
         flow = exclusions_by_group(ledger, ecg_attributes, spec.age_bands)
         exclusions_path = ctx.layout.artifact(EXCLUSIONS_LONG)
-        flow.to_csv(exclusions_path, index=False)
+        flow.to_csv(exclusions_path, index=False, lineterminator="\n")
 
         return StageResult(
             outputs=[attributes_path, table1_path, exclusions_path],

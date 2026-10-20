@@ -238,6 +238,27 @@ def runtime_override_info(card) -> List[str]:
     return [f"runtime.{override['name']} override applies on {override['platform']}: {changes}"]
 
 
+def prebuilt_extension_info(card, platform: Optional[str] = None) -> List[str]:
+    """An info line for a card with ``runtime.prebuilt_torch_extensions``: which built extensions it finds.
+
+    Not a problem either way: without one the card's code compiles it at first
+    load, which needs the toolchain its ``compile_env`` names.
+    """
+    runtime = card.runtime or {}
+    if not runtime.get("prebuilt_torch_extensions"):
+        return []
+    root = (runtime.get("run_env") or {}).get("TORCH_EXTENSIONS_DIR")
+    platform = sys.platform if platform is None else platform
+    suffix = ".pyd" if platform == "win32" else ".so"
+    names = sorted(p.parent.name for p in Path(root).glob(f"*/*{suffix}")
+                   if p.stem == p.parent.name) if root else []
+    if names:
+        return [f"prebuilt torch extension(s) {', '.join(names)} in {root}"]
+    if runtime.get("compile_env"):
+        return [f"no prebuilt torch extension in {root}; its code compiles one at first load"]
+    return []
+
+
 def longest_run_path(runs_root: Path, study) -> int:
     """Characters in the longest path a run of ``study`` writes: one model's prediction file.
 
@@ -410,7 +431,7 @@ def check_study(name: str, machine: Machine) -> int:
         env = card.runtime.get("env")
         if env:
             found.extend(check_driver_cuda(env, machine.torch_cuda(env), machine.driver))
-        info = runtime_override_info(card)
+        info = runtime_override_info(card) + prebuilt_extension_info(card)
         note = f" (info: {'; '.join(info)})" if info else ""
         print(f"  {model_id}: {'ok' if not found else '; '.join(found)}{note}")
         problems += len(found)

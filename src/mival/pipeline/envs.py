@@ -1,8 +1,9 @@
-"""Where a conda env keeps its interpreter, on POSIX and on Windows.
+"""Where an env keeps its interpreter, on POSIX and on Windows.
 
 A model card names its runtime env as a directory (``${MIVAL_HOME}/envs/...``).
-On Linux and macOS the interpreter is ``<env>/bin/python``; a Windows conda
-env keeps ``python.exe`` at its root. The run scripts and the bundle check
+On Linux and macOS the interpreter is ``<env>/bin/python``; a Windows env
+(a python-build-standalone folder, as the offline bundle ships, or a conda
+env) keeps ``python.exe`` at its root. The run scripts and the bundle check
 all ask here, so the two layouts are told apart in one place.
 """
 

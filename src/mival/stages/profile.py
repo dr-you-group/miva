@@ -114,5 +114,5 @@ def write_summary(ctx: StageContext, cohort, split, spec: ProfileSpec, test_posi
             for k, v in cohort["label_delta_days"].value_counts().sort_index().items()
         }
     path = ctx.layout.artifact(SUMMARY)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_bytes(json.dumps(payload, indent=2).encode("utf-8"))
     return path
