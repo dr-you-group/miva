@@ -63,6 +63,22 @@ from mival.signal import Signal, SourceMetadata
 PREPROCESS_INDEX = "preprocess_index.parquet"
 TENSOR_DIR = "tensors"
 
+#: One row per record the loader could read, including records every model
+#: card excluded. Stage ``describe`` reads it for device and recording size.
+SOURCE_INDEX = "source_index.parquet"
+SOURCE_INDEX_COLUMNS = (
+    "image_occurrence_id",
+    "person_id",
+    "device_manufacturer",
+    "device_model",
+    "sampling_rate_hz",
+    "duration_s",
+    "n_leads",
+)
+
+#: What a missing or empty device tag is reported as.
+UNKNOWN_DEVICE = "unknown"
+
 #: Sidecars. ``recipes.json`` is the "전처리 설정과 적용 순서" of
 #: docs/pipeline/03-preprocess.md, and it is also how stage 4 recovers the
 #: contract ``scaling`` that :func:`mival.perturbation.apply` needs without
@@ -155,7 +171,9 @@ def load_dicom_record(path: Path) -> Tuple[np.ndarray, SourceMetadata]:
              for channel in channels if "ChannelSensitivityUnitsSequence" in channel}
     data = np.ascontiguousarray(dataset.waveform_array(0).T, dtype=np.float32)
     source = SourceMetadata(leads=leads, sampling_rate_hz=float(item.SamplingFrequency),
-                            n_samples=int(data.shape[1]), unit=units.pop() if len(units) == 1 else None)
+                            n_samples=int(data.shape[1]), unit=units.pop() if len(units) == 1 else None,
+                            manufacturer=_optional_text(getattr(dataset, "Manufacturer", None)),
+                            model_name=_optional_text(getattr(dataset, "ManufacturerModelName", None)))
     return data, source
 
 
@@ -283,6 +301,7 @@ class PreprocessStage(Stage):
             )
 
         rows: List[Dict[str, Any]] = []
+        source_rows: List[Dict[str, Any]] = []
         recipes: Dict[str, Dict[str, Any]] = {}
         warnings: List[str] = list(grid_warnings)
         written: set = set()
@@ -317,6 +336,17 @@ class PreprocessStage(Stage):
                     f"{type(exc).__name__}: {exc}",
                 )
                 continue
+            source_rows.append(
+                {
+                    "image_occurrence_id": image_occurrence_id,
+                    "person_id": person_id,
+                    "device_manufacturer": _optional_text(source.manufacturer) or UNKNOWN_DEVICE,
+                    "device_model": _optional_text(source.model_name) or UNKNOWN_DEVICE,
+                    "sampling_rate_hz": source.sampling_rate_hz,
+                    "duration_s": source.duration_s,
+                    "n_leads": len(source.leads),
+                }
+            )
             signal = Signal(
                 data=data,
                 leads=source.leads,
@@ -405,6 +435,9 @@ class PreprocessStage(Stage):
         index_path = write_table(
             rows, ctx.layout.artifact(PREPROCESS_INDEX), PREPROCESS_INDEX_COLUMNS
         )
+        source_path = write_table(
+            source_rows, ctx.layout.artifact(SOURCE_INDEX), SOURCE_INDEX_COLUMNS
+        )
         recipes_path = self._write_json(
             ctx.layout.artifact(RECIPES),
             {"recipes": [recipes[rid] for rid in sorted(recipes)]},
@@ -426,7 +459,7 @@ class PreprocessStage(Stage):
         # listed one by one: checksumming N records x R recipes would dominate
         # this stage's wall time, and the manifest would grow without bound.
         return StageResult(
-            outputs=[index_path, recipes_path, grid_path],
+            outputs=[index_path, recipes_path, grid_path, source_path],
             counts={
                 "in": n_in,
                 "out": n_out,

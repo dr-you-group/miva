@@ -153,6 +153,8 @@ def capture_env() -> Dict[str, Any]:
         "python": platform.python_version(),
         "platform": platform.platform(),
         "libraries": versions,
+        "packages": _installed_packages(),
+        "cpu": _cpu_model(),
         "container_digest": os.environ.get("MIVAL_CONTAINER_DIGEST"),
         "cuda": None,
         "gpu": None,
@@ -166,6 +168,29 @@ def capture_env() -> Dict[str, Any]:
         except Exception:  # pragma: no cover - driver-dependent
             pass
     return env
+
+
+def _installed_packages() -> List[str]:
+    """Every installed distribution as ``name==version``, sorted."""
+    from importlib import metadata
+
+    found = set()
+    for dist in metadata.distributions():
+        name = dist.metadata["Name"]
+        if name:
+            found.add(f"{name}=={dist.version}")
+    return sorted(found)
+
+
+def _cpu_model() -> Optional[str]:
+    """CPU model string; no hostname-like value is ever recorded here."""
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or None
 
 
 def _installed_version(name: str) -> Optional[str]:

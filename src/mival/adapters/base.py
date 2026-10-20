@@ -10,15 +10,23 @@ implemented once, in NumPy, and both backends inherit exactly the same
 optimiser, regularisation and stopping rule. Only the modes that actually
 propagate gradients into the backbone are delegated to the backend, through
 ``_finetune``.
+
+Across fits, a frozen backbone's representation is reused through
+``cached_features`` (see ``mival.adapters._feature_cache`` for the key, the
+rule for which handles qualify, the memory bound and the opt-out). Both
+backends inherit that one mechanism: ``_collect_features`` reads through it,
+and ``forward_cached`` runs a fitted head over it for the prediction path.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence
 
 import numpy as np
 
 from mival.adapters._attribution import DEFAULT_STEPS
+from mival.adapters._feature_cache import FeatureCache, feature_cache_setting
 from mival.adapters._training import (
     FitData,
     FitHParams,
@@ -43,6 +51,9 @@ def to_model_layout(batch: np.ndarray, layout: str) -> np.ndarray:
 
 class Adapter:
     name: str = "adapter"
+
+    #: The open ``feature_cache_scope``'s cache, or ``None`` outside one.
+    _feature_cache: Optional[FeatureCache] = None
 
     def load(self, card: ModelCard) -> Any:
         raise NotImplementedError
@@ -203,8 +214,12 @@ class Adapter:
         chunks: List[np.ndarray] = []
         for start in range(0, len(split), data.batch_size):
             paths = split.tensor_paths[start : start + data.batch_size]
-            batch = data.load_batch(list(paths))
-            block = np.asarray(self.features(handle, batch, index), dtype=np.float64)
+            # The float64 conversion stays here, on whatever features()
+            # returned, so a cached row reaches the head exactly as a freshly
+            # computed one would.
+            block = np.asarray(
+                self.cached_features(handle, paths, data.load_batch, index), dtype=np.float64
+            )
             if block.ndim != 2 or block.shape[0] != len(paths):
                 raise TrainingError(
                     f"adapter {self.name!r} features() returned shape {block.shape} for a "
@@ -214,6 +229,130 @@ class Adapter:
         if not chunks:
             raise TrainingError(f"adapter {self.name!r}: no records to extract features from")
         return np.concatenate(chunks, axis=0)
+
+    # -- the cross-fit feature cache ------------------------------------------
+
+    @contextmanager
+    def feature_cache_scope(self) -> Iterator[Callable[[], Mapping[str, Any]]]:
+        """Reuse frozen-backbone representations until the block exits.
+
+        Yields a callable returning the record ``models`` writes to the train
+        log. With the cache switched off (``MIVAL_FEATURE_CACHE=0``) nothing is
+        installed and every call below computes exactly as it would outside a
+        scope. A scope opened inside another one replaces it until it exits.
+        """
+        enabled, budget, reason = feature_cache_setting()
+        if not enabled:
+            yield lambda: {"enabled": False, "used": False, "reason": reason}
+            return
+        outer = self._feature_cache
+        cache = FeatureCache(budget)
+        self._feature_cache = cache
+        try:
+            yield cache.report
+        finally:
+            self._feature_cache = outer
+
+    def _serves_cached_features(self, handle: Any) -> bool:
+        """Whether ``handle``'s representations may come from the cache.
+
+        Only a backbone exactly as the card publishes it: a fresh ``load``, or
+        a ``with_head(s)`` copy of one, which shares the unmodified module. The
+        flag is opt-in and nothing but ``load`` sets it, so a fine-tuned handle
+        or an adapter that never heard of the cache computes as before.
+        """
+        return (
+            self._feature_cache is not None
+            and getattr(handle, "backbone_as_published", False) is True
+            and getattr(handle, "card", None) is not None
+        )
+
+    def cached_features(
+        self,
+        handle: Any,
+        paths: Sequence[str],
+        load_batch: Callable[[Sequence[str]], np.ndarray],
+        index: int = 0,
+    ) -> np.ndarray:
+        """``features`` of the tensors at ``paths``, each computed once per scope.
+
+        Returned as ``features`` returned it — same dtype, no conversion — so
+        callers keep their own conversion where it was. A batch with nothing
+        cached is loaded and featurised as one call, exactly as without the
+        cache; a batch with some rows cached loads and featurises only the
+        rest. Outside a scope, or for a handle that does not qualify, this is
+        ``features(handle, load_batch(paths), index)``.
+        """
+        paths = [str(path) for path in paths]
+        cache = self._feature_cache
+        if cache is None or not self._serves_cached_features(handle):
+            return self.features(handle, load_batch(list(paths)), index)
+        identity = cache.identity(handle.card)
+        keys = [(identity, int(index), path) for path in paths]
+        rows: List[Optional[np.ndarray]] = [cache.get(key) for key in keys]
+        missing = [slot for slot, row in enumerate(rows) if row is None]
+        cache.reused += len(paths) - len(missing)
+        if not missing:
+            return np.stack(rows)  # type: ignore[arg-type]
+        wanted = paths if len(missing) == len(paths) else [paths[slot] for slot in missing]
+        block = np.asarray(self.features(handle, load_batch(list(wanted)), index))
+        if block.ndim != 2 or block.shape[0] != len(wanted):
+            raise TrainingError(
+                f"adapter {self.name!r} features() returned shape {block.shape} for a "
+                f"batch of {len(wanted)} records; (B, D) is required"
+            )
+        cache.computed += len(wanted)
+        for row, slot in zip(block, missing):
+            cache.put(keys[slot], row)
+            rows[slot] = row
+        if len(missing) == len(paths):
+            return block
+        return np.stack(rows)  # type: ignore[arg-type]
+
+    def forward_cached(
+        self,
+        handle: Any,
+        paths: Sequence[str],
+        load_batch: Callable[[Sequence[str]], np.ndarray],
+    ) -> Optional[np.ndarray]:
+        """A probe-headed handle's scores over cached representations, else ``None``.
+
+        ``forward`` receives arrays only, so it cannot know which tensor a row
+        came from; the prediction path in ``models`` offers paths here first
+        and falls back to ``forward`` on ``None``. ``None`` is returned for
+        every handle the cache does not serve — no open scope, a fine-tuned
+        backbone, or no fitted head (``inference_only`` scores through the
+        published head, not through ``features``) — so those paths are
+        untouched.
+        """
+        if not self._serves_cached_features(handle):
+            return None
+        loaded: Dict[tuple, np.ndarray] = {}
+
+        def load_once(batch_paths: Sequence[str]) -> np.ndarray:
+            # An ensemble reads one batch per member; without the cache
+            # forward() loads it once for all of them, and so does this.
+            key = tuple(batch_paths)
+            if key not in loaded:
+                loaded[key] = load_batch(list(batch_paths))
+            return loaded[key]
+
+        return self._fitted_head_scores(
+            handle, lambda index: self.cached_features(handle, paths, load_once, index)
+        )
+
+    def _fitted_head_scores(
+        self, handle: Any, features_of: Callable[[int], np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """What ``forward`` returns for a handle with fitted head(s), else ``None``.
+
+        ``features_of(index)`` supplies feature set ``index``. A backend
+        implements this once and calls it from ``forward`` with
+        ``features(handle, batch, index)``, so the cached and the uncached
+        prediction run the same head arithmetic. The default declines, which
+        keeps a backend that does not implement it on its own ``forward``.
+        """
+        return None
 
     def with_head(self, handle: Any, head: LinearHead, record: Mapping[str, Any]) -> Any:
         """A copy of ``handle`` whose ``forward`` runs ``head`` over ``features``."""

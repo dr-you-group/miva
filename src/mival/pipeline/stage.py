@@ -25,7 +25,7 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional
 from .hashing import config_hash
 from .layout import FAILED_MANIFEST_NAME, RunLayout, run_layout
 from .ledger import ExclusionLedger
-from .manifest import ArtifactRef, RunManifest
+from .manifest import ArtifactRef, RunManifest, capture_env
 from .runkey import RunKey
 
 # Spec §3.3, in pipeline order. Stage 6 (misclassification) is registered when
@@ -35,6 +35,7 @@ _STAGES: Dict[str, str] = {
     "retrieve": "mival.stages.retrieve:RetrieveStage",
     "profile": "mival.stages.profile:ProfileStage",
     "preprocess": "mival.stages.preprocess:PreprocessStage",
+    "describe": "mival.stages.describe:DescribeStage",
     "models": "mival.stages.models:ModelsStage",
     "evaluate": "mival.stages.evaluate:EvaluateStage",
     # "misclassify": "mival.stages.misclassify:MisclassifyStage",
@@ -51,7 +52,7 @@ _UNBUILT: Dict[str, str] = {
 }
 
 # Spec §3.3 pipeline order, including the parts not yet built.
-STAGE_ORDER = ("retrieve", "profile", "preprocess", "models", "evaluate", "misclassify")
+STAGE_ORDER = ("retrieve", "profile", "preprocess", "describe", "models", "evaluate", "misclassify")
 
 
 def stage_names() -> List[str]:
@@ -81,6 +82,9 @@ class StageContext:
     ledger: ExclusionLedger
     inputs: Mapping[str, Path] = field(default_factory=dict)
     seed: Optional[int] = None
+    #: How to run, never what to compute (``Study.execution``, e.g. ``workers``).
+    #: Not hashed: the same study gets the same config_hash on any machine.
+    execution: Mapping[str, Any] = field(default_factory=dict)
 
     def input_path(self, name: str) -> Path:
         try:
@@ -101,6 +105,9 @@ class StageResult:
     contamination: Optional[Dict[str, Any]] = None
     warnings: List[str] = field(default_factory=list)
     run_keys: List[RunKey] = field(default_factory=list)
+    #: Extra entries for the manifest's ``compute`` block (how the run ran,
+    #: such as the evaluation stage's ``workers``); the wrapper's own keys win.
+    compute: Dict[str, Any] = field(default_factory=dict)
 
 
 class Stage:
@@ -133,6 +140,17 @@ class Stage:
         """
         return {}
 
+    def config_digests(self, spec: Mapping[str, Any]) -> Dict[str, str]:
+        """Checksums of facts that are not files but must enter config_hash.
+
+        Name -> 64-character SHA-256. The case that motivated it: a ModelCard
+        runtime override applied on this platform (``mival.runtime_platform``)
+        changes what runs while every card file stays the same. Empty by
+        default, and empty wherever no override applies, so the hash is then
+        what it always was.
+        """
+        return {}
+
     def run(self, ctx: StageContext) -> StageResult:  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -160,6 +178,7 @@ def prepare(
     inputs: Mapping[str, Path],
     runs_root,
     seed: Optional[int] = None,
+    execution: Optional[Mapping[str, Any]] = None,
 ) -> StageContext:
     """Build the context: hash the config, resolve paths, arm the ledger."""
     from .hashing import sha256_path
@@ -174,6 +193,13 @@ def prepare(
         resolved[name] = Path(path)
 
     checksums = {name: sha256_path(path) for name, path in sorted(resolved.items())}
+    for name, digest in stage.config_digests(spec).items():
+        if name in checksums:
+            raise ValueError(
+                f"stage {stage.name!r} declares config digest {name!r}, which collides "
+                "with an input of the same name"
+            )
+        checksums[name] = digest
     digest = config_hash(spec, checksums)
     layout = run_layout(study_id, stage.name, digest, runs_root)
     return StageContext(
@@ -184,6 +210,7 @@ def prepare(
         ledger=ExclusionLedger(stage=stage.name, allowed_codes=stage.reason_codes),
         inputs=resolved,
         seed=seed,
+        execution=dict(execution or {}),
     )
 
 
@@ -225,6 +252,7 @@ def execute(stage: Stage, ctx: StageContext, force: bool = False) -> Dict[str, A
         # so its own "excluded" count is overwritten rather than trusted.
         counts["excluded"] = len(ctx.ledger)
 
+        env = capture_env()
         manifest = RunManifest(
             run_id=f"{ctx.study_id}.{stage.name}.{layout.config_hash}",
             stage=stage.name,
@@ -232,11 +260,13 @@ def execute(stage: Stage, ctx: StageContext, force: bool = False) -> Dict[str, A
             site=ctx.site,
             config_hash=layout.config_hash,
             seed=ctx.seed,
+            env=env,
             input_artifacts=[ArtifactRef.of(path) for _, path in sorted(ctx.inputs.items())],
             output_artifacts=[_output_ref(path, layout) for path in result.outputs],
             counts=counts,
             contamination=result.contamination or {"flag": False, "overlapping_corpora": []},
             compute={
+                **dict(result.compute),
                 "wall_time_s": round(wall_time, 3),
                 "peak_memory_bytes": _peak_memory_bytes(),
                 "throughput_records_per_s": (
@@ -244,7 +274,7 @@ def execute(stage: Stage, ctx: StageContext, force: bool = False) -> Dict[str, A
                     if wall_time > 0 and counts.get("out")
                     else None
                 ),
-                "gpu_hours": None,
+                "gpu_hours": round(wall_time / 3600, 4) if env.get("gpu") else 0.0,
             },
             warnings=([stale] if stale else []) + list(result.warnings),
             errors=errors,

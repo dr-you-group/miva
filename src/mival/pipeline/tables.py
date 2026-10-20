@@ -10,7 +10,7 @@ a stage that writes no tables must still be able to run.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Sequence, Union
+from typing import Any, Callable, Iterable, Optional, List, Mapping, Sequence, Union
 
 _MISSING = (
     "reading and writing parquet requires pandas and pyarrow. Install them into "
@@ -51,19 +51,51 @@ def write_table(
     return target
 
 
+def join_key(series):
+    """Ids as text for joining tables that store them differently.
+
+    Prediction files carry ids as strings, a table built from the CDM keeps
+    its integer ids, and a column of integers with a gap comes back from
+    parquet as float. An integer-valued number is written without a decimal
+    part (``101``, ``101.0`` and ``"101"`` all become ``"101"``); every other
+    value is ``str(value)`` unchanged, so ``"007"`` stays ``"007"``. A missing
+    value is None.
+    """
+    import numbers
+
+    pandas = _pandas()
+
+    def text(value):
+        if value is None or (not isinstance(value, str) and pandas.isna(value)):
+            return None
+        if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+            return str(int(value))
+        if isinstance(value, numbers.Real) and not isinstance(value, bool) and float(value).is_integer():
+            return str(int(value))
+        return str(value)
+
+    return series.astype(object).map(text)
+
+
 def read_table(path: Union[str, Path]):
     return _pandas().read_parquet(path)
 
 
-def read_dataset(root: Union[str, Path], columns: Sequence[str]):
+def read_dataset(
+    root: Union[str, Path],
+    columns: Sequence[str],
+    include: Optional[Callable[[Path], bool]] = None,
+):
     """Concatenate every parquet part under ``root`` into one frame.
 
     Returns an empty frame with the given columns when no part files exist, so
     that callers can group and filter without a special case for "nothing was
-    excluded yet".
+    excluded yet". ``include`` keeps only the part files it accepts.
     """
     pandas = _pandas()
     parts: List[Path] = sorted(Path(root).rglob("*.parquet")) if Path(root).exists() else []
+    if include is not None:
+        parts = [part for part in parts if include(part)]
     if not parts:
         return pandas.DataFrame(columns=list(columns))
     return pandas.concat([pandas.read_parquet(part) for part in parts], ignore_index=True)

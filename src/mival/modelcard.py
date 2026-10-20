@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from mival.contract import InputContract
 from mival.placeholders import expand
+from mival.runtime_platform import STATE_DICT_TRANSFORM, apply_platform_override, state_dict_transform_spec
 
 _REQUIRED_TOP_FIELDS = (
     "model_id",
@@ -45,12 +46,22 @@ class ModelCard:
     training_modes_supported: Tuple[str, ...]
     pretraining_corpora: Tuple[str, ...]
     raw: Dict[str, Any]
+    #: The platform override applied at load (``mival.runtime_platform``):
+    #: ``{"name", "platform", "changes"}``, or None when the card is as written.
+    runtime_override: Optional[Dict[str, Any]] = None
 
 
-def load_card(path: Path) -> ModelCard:
-    body = json.loads(Path(path).read_text())
+def load_card(path: Path, platform: Optional[str] = None) -> ModelCard:
+    """Read a card, with ``${NAME}`` placeholders filled and this platform's runtime override applied.
+
+    ``platform`` replaces ``sys.platform`` / ``$MIVAL_RUNTIME_PLATFORM`` when
+    choosing the override (see :mod:`mival.runtime_platform`).
+    """
+    body = json.loads(Path(path).read_text(encoding="utf-8"))
+    override = None
     if "x-mival" in body:
         body["x-mival"] = expand(body["x-mival"], Path(path))
+        body["x-mival"], override = apply_platform_override(body["x-mival"], Path(path), platform)
     for key in _REQUIRED_TOP_FIELDS:
         if key not in body:
             raise ValueError(f"{path}: {key} is required")
@@ -60,6 +71,9 @@ def load_card(path: Path) -> ModelCard:
     for key in _REQUIRED_MIVAL_FIELDS:
         if key not in ext:
             raise ValueError(f"{path}: x-mival.{key} is required")
+    transform = (ext.get("runtime") or {}).get(STATE_DICT_TRANSFORM)
+    if transform is not None:
+        state_dict_transform_spec(transform, path)
     return ModelCard(
         model_id=body["model_id"],
         name=body["Name"],
@@ -74,12 +88,13 @@ def load_card(path: Path) -> ModelCard:
         training_modes_supported=tuple(ext["training_modes_supported"]),
         pretraining_corpora=tuple(ext["pretraining_corpora"]),
         raw=body,
+        runtime_override=override,
     )
 
 
-def load_registry(directory: Path) -> Dict[str, ModelCard]:
+def load_registry(directory: Path, platform: Optional[str] = None) -> Dict[str, ModelCard]:
     cards = {}
     for path in sorted(Path(directory).glob("*.json")):
-        card = load_card(path)
+        card = load_card(path, platform)
         cards[card.model_id] = card
     return cards

@@ -23,7 +23,7 @@ quantity being measured), nor a spline calibration curve.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -33,6 +33,8 @@ from ._common import as_arrays, expit, logit
 METRICS: Tuple[str, ...] = (
     "citl",
     "calibration_intercept",
+    "calibration_intercept_offset",
+    "oe_ratio",
     "calibration_slope",
     "eci",
     "brier",
@@ -82,6 +84,56 @@ def calibration_in_the_large(y_true: Sequence, y_prob: Sequence) -> float:
     """Level 1 of Van Calster's hierarchy: observed minus predicted risk."""
     y, p = as_arrays(y_true, y_prob)
     return float(np.mean(y) - np.mean(p))
+
+
+#: Largest logit move of one Newton step in the offset intercept solve.
+_MAX_NEWTON_STEP = 5.0
+
+
+def oe_ratio(y_true: Sequence, y_prob: Sequence) -> float:
+    """Observed over expected events, ``sum(y) / sum(p)``; NaN if nothing is expected."""
+    y, p = as_arrays(y_true, y_prob)
+    expected = float(np.sum(p))
+    if expected == 0.0:
+        return float("nan")
+    return float(np.sum(y) / expected)
+
+
+def calibration_intercept_offset(y_true: Sequence, y_prob: Sequence) -> float:
+    """Calibration intercept with the slope fixed at 1 (Van Calster 2019).
+
+    The intercept-only logistic MLE with ``logit(p)`` as offset, solved by
+    one-dimensional Newton. Unlike the joint intercept it is not tangled with
+    the slope, so it reads as calibration-in-the-large on the logit scale.
+    NaN when only one class is present: the MLE is then infinite.
+    """
+    y, p = as_arrays(y_true, y_prob)
+    if len(np.unique(y)) < 2:
+        return float("nan")
+    fitted = _fit_offset_intercept(y, logit(p))
+    return float("nan") if fitted is None else fitted
+
+
+def _fit_offset_intercept(y: np.ndarray, offset: np.ndarray) -> Optional[float]:
+    """The intercept ``a`` of ``y ~ a + offset``, or None when Newton does not settle.
+
+    Shared by the reported calibration intercept and the intercept
+    recalibration, so the two can never disagree.
+    """
+    a = 0.0
+    for _ in range(200):
+        fitted = expit(a + offset)
+        score = float(np.sum(y - fitted))
+        information = float(np.sum(fitted * (1.0 - fitted)))
+        if information <= 0.0:
+            return None
+        # The score is monotone decreasing in a, so a capped Newton step never
+        # overshoots into the saturated region where the information vanishes.
+        step = float(np.clip(score / information, -_MAX_NEWTON_STEP, _MAX_NEWTON_STEP))
+        a += step
+        if abs(step) < 1e-12:
+            return float(a)
+    return None
 
 
 def _bin_assignments(p: np.ndarray, bins: Optional[int]) -> np.ndarray:
@@ -179,6 +231,37 @@ def logistic_recalibration(y_true: Sequence, y_prob: Sequence) -> Tuple[float, f
     if beta is None:
         return float("nan"), float("nan")
     return float(beta[0]), float(beta[1])
+
+
+def fit_recalibration(
+    y_dev: Sequence, p_dev: Sequence, kind: str
+) -> Optional[Callable[[np.ndarray], np.ndarray]]:
+    """A probability update fitted on development data, or None when it cannot be.
+
+    ``kind="intercept"`` shifts the logit by the offset-intercept MLE (slope
+    fixed at 1); ``kind="logistic"`` maps ``logit(p)`` to ``a + b * logit(p)``.
+    Both are fitted by the solvers the reported calibration metrics use. None
+    for a single-class development set, a constant score (no slope) or a fit
+    that does not converge — the caller reports no update rows then.
+    """
+    if kind not in ("intercept", "logistic"):
+        raise ValueError(f"unknown recalibration kind {kind!r}")
+    y, p = as_arrays(y_dev, p_dev)
+    if y.size == 0 or len(np.unique(y)) < 2:
+        return None
+    x = logit(p)
+    if kind == "intercept":
+        a = _fit_offset_intercept(y, x)
+        if a is None:
+            return None
+        return lambda values: expit(a + logit(values))
+    if np.allclose(x, x[0]):
+        return None
+    beta = fit_logistic(np.column_stack([np.ones_like(x), x]), y)
+    if beta is None:
+        return None
+    a, b = float(beta[0]), float(beta[1])
+    return lambda values: expit(a + b * logit(values))
 
 
 def _rcs_basis(x: np.ndarray, knots: np.ndarray) -> np.ndarray:
@@ -289,6 +372,8 @@ def calibration_metrics(
     return {
         "citl": calibration_in_the_large(y_true, y_prob),
         "calibration_intercept": intercept,
+        "calibration_intercept_offset": calibration_intercept_offset(y_true, y_prob),
+        "oe_ratio": oe_ratio(y_true, y_prob),
         "calibration_slope": slope,
         "eci": eci(y_true, y_prob, n_knots=n_knots),
         "brier": decomposition["brier"],

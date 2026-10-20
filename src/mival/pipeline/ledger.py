@@ -13,9 +13,10 @@ excluded record that silently biases the cohort.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Callable, FrozenSet, List, Optional, Union
+from pathlib import Path, PureWindowsPath
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Union
 
 from .tables import read_dataset, write_table
 
@@ -89,6 +90,39 @@ class ExclusionLedger:
         return write_table(self.rows, path, COLUMNS)
 
 
-def read_exclusions(root: Union[str, Path]):
-    """Reassemble the single logical ledger table of spec §3.6."""
-    return read_dataset(root, COLUMNS)
+def load_runs(path: Union[str, Path]) -> Dict[str, List[str]]:
+    """Read ``runs.json`` (stage -> run directories) as stage -> config hashes.
+
+    The hash is the last part of the run directory whether it was written
+    with '/' or '\\', so a runs.json written on Windows reads the same here.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {stage: [PureWindowsPath(run_dir).name for run_dir in run_dirs]
+            for stage, run_dirs in raw.items()}
+
+
+def read_exclusions(root: Union[str, Path], runs: Optional[Mapping[str, Sequence[str]]] = None):
+    """Reassemble the single logical ledger table of spec §3.6.
+
+    The ledger directory accumulates part files from every earlier invocation
+    of the study. With ``runs`` (stage -> config hashes of this invocation) only
+    those parts are read, so a stale run's exclusions cannot leak into the flow;
+    a stage absent from ``runs`` is not read at all.
+    """
+    if runs is None:
+        return read_dataset(root, COLUMNS)
+    base = Path(root)
+    wanted = {stage: set(hashes) for stage, hashes in runs.items()}
+    for stage, hashes in sorted(wanted.items()):
+        # A stage that keeps no ledger has no directory; but a listed run whose
+        # part file is missing in an existing directory would understate the flow.
+        if (base / stage).is_dir():
+            for config_hash in sorted(hashes):
+                if not (base / stage / f"{config_hash}.parquet").is_file():
+                    raise ValueError(
+                        f"runs lists {stage}/{config_hash} but {base / stage} has no "
+                        f"{config_hash}.parquet"
+                    )
+    return read_dataset(
+        root, COLUMNS, include=lambda part: part.stem in wanted.get(part.parent.name, ())
+    )

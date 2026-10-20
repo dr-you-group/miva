@@ -4,6 +4,16 @@
 
 site: my-site                      # 기관 식별자 (예: severance). 결과 manifest에 기록됨
 
+# models 단계에서 쓸 GPU 번호. arm 하나가 GPU 하나를 쓰고, 동시에 len(gpus)개가 돈다.
+# 예: [0, 1] (2장), [0, 1, 2, 3, 4, 5, 6, 7] (8장). 비우면 GPU가 있을 때 [0], 없으면 CPU에서 하나씩.
+# 실행 방식일 뿐이라 결과와 config_hash는 GPU 수와 상관없이 같다.
+gpus: []
+
+# evaluate 단계에서 쓸 CPU 프로세스 수. 하위군·bootstrap 계산을 이 수만큼 나눠 돌린다.
+# 비우면 CPU 수와 8 중 작은 값, 1이면 한 프로세스에서 차례로. 프로세스 하나가 메모리를 따로 쓰므로
+# 메모리가 모자라면 줄인다. 실행 방식일 뿐이라 결과와 config_hash는 workers 값과 상관없이 같다.
+# workers: 8
+
 retrieve:
   dbms: postgresql                 # postgresql 또는 sqlserver
   dsn_env: ${MIVAL_HOME}/config/micdm.env   # DB 접속 파일 (micdm.env.example 참고)

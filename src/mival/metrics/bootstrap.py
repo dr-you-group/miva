@@ -34,12 +34,18 @@ DEFAULT_ALPHA = 0.05
 
 @dataclass(frozen=True)
 class BootstrapCI:
-    """A point estimate with its resampled interval."""
+    """A point estimate with its resampled interval and standard error.
+
+    ``se`` is the standard deviation (ddof=1) of the finite replicates. It is
+    reported beside the percentile interval so that a later pooling across
+    sites can weight by it without re-running the bootstrap.
+    """
 
     value: float
     ci_lo: float
     ci_hi: float
     n_valid: int
+    se: float
     p_value: Optional[float] = None
 
 
@@ -126,7 +132,7 @@ class Resampler:
 
 
 def percentile_ci(samples: Sequence[float], alpha: float = DEFAULT_ALPHA):
-    """Percentile interval over the finite replicates.
+    """``(lo, hi, n_valid, se)``: percentile interval and SE over the finite replicates.
 
     Non-finite replicates are dropped rather than propagated: a resample of a
     rare-event subgroup can contain one class only, for which AUROC is
@@ -135,10 +141,10 @@ def percentile_ci(samples: Sequence[float], alpha: float = DEFAULT_ALPHA):
     values = np.asarray(samples, dtype=float)
     finite = values[np.isfinite(values)]
     if finite.size < 2:
-        return float("nan"), float("nan"), int(finite.size)
+        return float("nan"), float("nan"), int(finite.size), float("nan")
     lo = float(np.percentile(finite, 100.0 * alpha / 2.0))
     hi = float(np.percentile(finite, 100.0 * (1.0 - alpha / 2.0)))
-    return lo, hi, int(finite.size)
+    return lo, hi, int(finite.size), float(np.std(finite, ddof=1))
 
 
 def bootstrap_distribution(
@@ -193,8 +199,10 @@ def bootstrap_ci(
     )
     results: Dict[str, BootstrapCI] = {}
     for name, value in full.items():
-        lo, hi, n_valid = percentile_ci(samples.get(name, np.array([])), alpha=alpha)
-        results[name] = BootstrapCI(value=float(value), ci_lo=lo, ci_hi=hi, n_valid=n_valid)
+        lo, hi, n_valid, se = percentile_ci(samples.get(name, np.array([])), alpha=alpha)
+        results[name] = BootstrapCI(
+            value=float(value), ci_lo=lo, ci_hi=hi, n_valid=n_valid, se=se
+        )
     return results
 
 
@@ -236,10 +244,40 @@ def paired_bootstrap_difference(
             for name in names
         }
 
-    full = difference(np.arange(y.size))
-    samples = bootstrap_distribution(
+    return paired_bootstrap(
         difference,
         y.size,
+        n_replicates=n_replicates,
+        seed=seed,
+        groups=groups,
+        strata=strata,
+        alpha=alpha,
+    )
+
+
+def paired_bootstrap(
+    difference: Callable[[np.ndarray], Mapping[str, float]],
+    n_rows: int,
+    n_replicates: int,
+    seed: int,
+    groups: Optional[Sequence] = None,
+    strata: Optional[Sequence] = None,
+    alpha: float = DEFAULT_ALPHA,
+) -> Dict[str, BootstrapCI]:
+    """Interval and two-sided p-value of every ``a - b`` that ``difference`` returns.
+
+    ``difference(indices)`` evaluates both arms on the same rows and returns
+    the differences; the rows are drawn once per replicate, so every
+    difference of one call (a scalar metric and a whole curve grid alike)
+    shares its resamples. :func:`paired_bootstrap_difference` is this with a
+    ``(y, p)`` statistic; a survival comparison passes its own ``difference``
+    because its statistic needs the follow-up time as well. The p-value is
+    ``2 * min(P(d* <= 0), P(d* >= 0))``.
+    """
+    full = difference(np.arange(int(n_rows)))
+    samples = bootstrap_distribution(
+        difference,
+        int(n_rows),
         n_replicates=n_replicates,
         seed=seed,
         groups=groups,
@@ -248,7 +286,7 @@ def paired_bootstrap_difference(
     results: Dict[str, BootstrapCI] = {}
     for name, value in full.items():
         draws = samples.get(name, np.array([]))
-        lo, hi, n_valid = percentile_ci(draws, alpha=alpha)
+        lo, hi, n_valid, se = percentile_ci(draws, alpha=alpha)
         finite = np.asarray(draws, dtype=float)
         finite = finite[np.isfinite(finite)]
         if finite.size < 2:
@@ -258,6 +296,23 @@ def paired_bootstrap_difference(
             above = float(np.mean(finite >= 0.0))
             p_value = float(min(1.0, 2.0 * min(below, above)))
         results[name] = BootstrapCI(
-            value=float(value), ci_lo=lo, ci_hi=hi, n_valid=n_valid, p_value=p_value
+            value=float(value), ci_lo=lo, ci_hi=hi, n_valid=n_valid, se=se, p_value=p_value
         )
     return results
+
+
+def holm(p_values: Sequence[Optional[float]]) -> List[Optional[float]]:
+    """Holm's step-down adjustment of one family of p-values, in input order.
+
+    ``None`` stays ``None`` and is not counted in the family: a comparison
+    with no p-value is not a test. With ``m`` tests sorted ascending, the
+    ``k``-th (from 1) is ``max_{j<=k} min(1, (m - j + 1) p_(j))``.
+    """
+    present = [(index, float(p)) for index, p in enumerate(p_values) if p is not None]
+    adjusted: List[Optional[float]] = [None] * len(p_values)
+    m = len(present)
+    running = 0.0
+    for rank, (index, p) in enumerate(sorted(present, key=lambda item: item[1])):
+        running = max(running, min(1.0, (m - rank) * p))
+        adjusted[index] = running
+    return adjusted

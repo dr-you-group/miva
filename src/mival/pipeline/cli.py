@@ -85,6 +85,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         inputs=inputs,
         runs_root=args.runs_root,
         seed=args.seed if args.seed is not None else study.seed,
+        execution=study.execution,
     )
     summary = execute(stage, ctx, force=args.force)
     print(json.dumps(summary, indent=2, ensure_ascii=False))

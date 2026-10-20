@@ -30,7 +30,10 @@ METRICS: Tuple[str, ...] = (
     "f1",
     "mcc",
     "balanced_accuracy",
-    "discrimination_slope",
+    "tp",
+    "fp",
+    "tn",
+    "fn",
 )
 
 _SKLEARN_MISSING = (
@@ -81,16 +84,6 @@ def auprc(y_true: Sequence, y_prob: Sequence) -> float:
     return float(_sklearn().average_precision_score(y, p))
 
 
-def discrimination_slope(y_true: Sequence, y_prob: Sequence) -> float:
-    """Yates' slope: mean predicted risk in events minus in non-events."""
-    y, p = as_arrays(y_true, y_prob)
-    events = p[y == 1.0]
-    non_events = p[y == 0.0]
-    if events.size == 0 or non_events.size == 0:
-        return float("nan")
-    return float(np.mean(events) - np.mean(non_events))
-
-
 def contingency_metrics(tp: int, fp: int, tn: int, fn: int) -> Dict[str, float]:
     """The seven threshold-dependent measures derived from a 2x2 table."""
     sensitivity = safe_divide(tp, tp + fn)
@@ -125,8 +118,11 @@ def discrimination_metrics(
         "auroc": auroc(y_true, y_prob),
         "auprc": auprc(y_true, y_prob),
     }
-    values.update(contingency_metrics(*confusion_counts(y_true, y_prob, threshold)))
-    values["discrimination_slope"] = discrimination_slope(y_true, y_prob)
+    counts = confusion_counts(y_true, y_prob, threshold)
+    values.update(contingency_metrics(*counts))
+    # The 2x2 table itself (STARD-AI, TRIPOD+AI 23a): a reader can rebuild any
+    # threshold measure from it, and a small cell is visible as a count.
+    values.update(zip(("tp", "fp", "tn", "fn"), (float(count) for count in counts)))
     return values
 
 

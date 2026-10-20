@@ -31,6 +31,10 @@ class KerasHandle:
     heads: List[LinearHead] = field(default_factory=list)
     #: What the fit did, copied into ``train_log.jsonl`` by the models stage.
     fit_record: Optional[Mapping[str, Any]] = None
+    #: True only for the card's weights untouched: set by ``load`` and carried
+    #: by ``with_heads``. It is what lets ``Adapter.cached_features`` reuse a
+    #: representation across fits.
+    backbone_as_published: bool = False
 
 
 def _as_two_class(positive: np.ndarray) -> np.ndarray:
@@ -115,22 +119,12 @@ class KerasAdapter(Adapter):
         import tensorflow as tf
 
         members = [_load_member(tf, card, spec) for spec in card.weights]
-        return KerasHandle(members=members, card=card)
+        return KerasHandle(members=members, card=card, backbone_as_published=True)
 
     def forward(self, handle: KerasHandle, batch: np.ndarray) -> np.ndarray:
-        if handle.heads:
-            # A probed ensemble pools where the unprobed one pools: at the
-            # probability level, by the card's own rule. Each member's head
-            # emits a positive-class probability, so the two-column form
-            # `pool_ensemble` expects is rebuilt from it.
-            # `_as_two_class` also fits an identity head: column 1 is then the
-            # predicted value rather than a probability, and `pool_ensemble`
-            # still averages it across members the same way.
-            outputs = [
-                _as_two_class(head.predict(self.features(handle, batch, index)))
-                for index, head in enumerate(handle.heads)
-            ]
-            return pool_ensemble(outputs, self._pooling(handle), 1)
+        scores = self._fitted_head_scores(handle, lambda index: self.features(handle, batch, index))
+        if scores is not None:
+            return scores
         arranged = to_model_layout(batch, handle.card.input_contract.layout)
         kind = handle.card.output.get("type")
         if kind in DECODED_TYPES and not (
@@ -151,6 +145,22 @@ class KerasAdapter(Adapter):
         else:
             column = handle.card.output["positive_index"]
         return pool_ensemble(outputs, self._pooling(handle), column)
+
+    def _fitted_head_scores(self, handle: KerasHandle, features_of: Any) -> Optional[np.ndarray]:
+        if not handle.heads:
+            return None
+        # A probed ensemble pools where the unprobed one pools: at the
+        # probability level, by the card's own rule. Each member's head
+        # emits a positive-class probability, so the two-column form
+        # `pool_ensemble` expects is rebuilt from it.
+        # `_as_two_class` also fits an identity head: column 1 is then the
+        # predicted value rather than a probability, and `pool_ensemble`
+        # still averages it across members the same way.
+        outputs = [
+            _as_two_class(head.predict(features_of(index)))
+            for index, head in enumerate(handle.heads)
+        ]
+        return pool_ensemble(outputs, self._pooling(handle), 1)
 
     def _decoded(self, handle: KerasHandle, arranged: np.ndarray) -> np.ndarray:
         """Head by name, optional framing, member mean, then the shared decoder."""
@@ -235,6 +245,7 @@ class KerasAdapter(Adapter):
             card=handle.card,
             heads=list(heads),
             fit_record=dict(record),
+            backbone_as_published=handle.backbone_as_published,
         )
 
     def _finetune(

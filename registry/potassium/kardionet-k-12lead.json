@@ -41,7 +41,7 @@
         "sha256": "40402d4fd43e5888a8c170f9abc69e5791fb0e754aaed01446016570159e2c34",
         "role": "full",
         "derived_from": {
-          "uri": "/opt/hyperkalemia/model_12_lead.pt",
+          "file": "model_12_lead.pt",
           "sha256": "26800a8757bb3c7e74d96a41af86a3f6cd5f1bed3827f14e621df29df1096342",
           "by": "mival_wrap_potassium.fit_kardionet_stats on 1,000 MIMIC ECGs (mimic_sample_1000.npy sha256 51876148ba3cce192ff44f2c42c52aa488f18a3eda19ddaa409e7b43b4c8a622)"
         }

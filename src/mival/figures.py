@@ -42,7 +42,13 @@ def _pyplot():
     return pyplot
 
 
+#: The figure most recently written by :func:`_save`, kept so a test can inspect
+#: what was drawn (the file alone cannot tell an empty figure from a full one).
+_last_figure: list = [None]
+
+
 def _save(figure, path: Union[str, Path]) -> Path:
+    _last_figure[0] = figure
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout()
@@ -51,16 +57,28 @@ def _save(figure, path: Union[str, Path]) -> Path:
     return target
 
 
+def _count(value: Any) -> str:
+    """A count as text. A masked count ("<10") is shown as given."""
+    if isinstance(value, str):
+        return value
+    return f"{value:,}"
+
+
 def stard_flow(
-    stages: Sequence[Tuple[str, int]],
-    exclusions: Sequence[Tuple[str, str, int]],
+    stages: Sequence[Tuple[str, Any]],
+    exclusions: Sequence[Tuple[str, str, Any]],
     path: Union[str, Path],
     title: str = "STARD participant flow",
+    side: Sequence[Tuple[str, Any]] = (),
 ) -> Path:
     """Participant flow: ``stages`` are ``(label, n_remaining)`` boxes and
     ``exclusions`` are ``(stage, reason_code, n)`` annotations beside them.
 
     Both come from the ledger, so the diagram and the counts cannot disagree.
+
+    ``side`` boxes branch off the box before the last one and sit beside the
+    last box, with no arrow into it: a set that was set aside (for example the
+    development split) rather than filtered down into the analysed set.
     """
     pyplot = _pyplot()
     figure, axes = pyplot.subplots(figsize=(7.5, 1.6 * max(len(stages), 1) + 1.2))
@@ -77,7 +95,7 @@ def stard_flow(
         axes.text(
             2.4,
             y,
-            f"{label}\nn = {remaining:,}",
+            f"{label}\nn = {_count(remaining)}",
             ha="center",
             va="center",
             fontsize=9,
@@ -92,7 +110,9 @@ def stard_flow(
             )
         dropped = by_stage.get(label, [])
         if dropped:
-            body = "\n".join(f"{reason}: {count:,}" for reason, count in sorted(dropped))
+            body = "\n".join(
+                f"{reason}: {_count(count)}" for reason, count in sorted(dropped, key=lambda r: r[0])
+            )
             axes.text(
                 6.2,
                 y - 0.42,
@@ -101,6 +121,27 @@ def stard_flow(
                 va="center",
                 fontsize=8,
                 bbox={"boxstyle": "round,pad=0.4", "facecolor": "0.95", "edgecolor": "0.6"},
+            )
+    if side and stages:
+        last = 0.5
+        source = last + 1.0 if len(stages) > 1 else last
+        for index, (label, count) in enumerate(side):
+            y = last - 0.45 * index
+            axes.text(
+                7.8,
+                y,
+                f"{label}\nn = {_count(count)}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                bbox={"boxstyle": "round,pad=0.5", "facecolor": "white", "edgecolor": "black",
+                      "linestyle": "--"},
+            )
+            axes.annotate(
+                "",
+                xy=(6.9, y),
+                xytext=(3.4, source - 0.3),
+                arrowprops={"arrowstyle": "->", "color": "0.4", "linestyle": "--"},
             )
     axes.set_title(title)
     return _save(figure, path)
@@ -184,9 +225,9 @@ def decision_curves(
 ) -> Path:
     """Decision curves against treat-all and treat-none.
 
-    ``band`` shades the clinically plausible threshold range; for STEMI the
-    spec puts it at roughly 1-10%, and performance outside it is not evidence
-    of clinical usefulness.
+    ``band`` shades the clinically plausible threshold range when the study
+    states one (``evaluate.decision_band``); nothing is shaded otherwise.
+    Performance outside that range is not evidence of clinical usefulness.
     """
     pyplot = _pyplot()
     figure, axes = pyplot.subplots(figsize=(6, 4.5))
@@ -285,7 +326,7 @@ def forest_plot(
     axes.set_yticks([])
     axes.set_ylim(-0.8, len(estimates) - 0.2)
     axes.set_xlabel(metric_label)
-    axes.set_title("Subgroup estimates (* suppressed: fewer than the minimum events)")
+    axes.set_title("Subgroup estimates (* suppressed: too few events or non-events)")
     return _save(figure, path)
 
 
@@ -406,3 +447,378 @@ def case_waveform(
     figure.savefig(target, dpi=150)
     pyplot.close(figure)
     return target
+
+
+# ---------------------------------------------------------------------------
+# Figures drawn from the exported tables (curves_long / metrics_long).
+#
+# These read the tables, not predictions, so a cell masked on export (NaN, or
+# a "<10" count) stays masked in the figure. NaN points are skipped, and a
+# count column is never assumed numeric.
+# ---------------------------------------------------------------------------
+
+_ARM_AXES = ("site", "model_id", "training_mode", "recipe_id", "perturbation_id", "label_def")
+
+
+def _numeric(frame, columns):
+    import pandas as pd
+
+    out = frame.copy()
+    for column in columns:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    return out
+
+
+def _arm_labels(frame) -> dict:
+    """Arm key -> label built from the axes that differ between arms."""
+    axes = [a for a in _ARM_AXES if a in frame.columns]
+    varying = [a for a in axes if frame[a].astype(str).nunique() > 1]
+    if not varying:
+        varying = [a for a in ("model_id",) if a in frame.columns]
+    labels: dict = {}
+    for _, row in frame[axes].drop_duplicates().iterrows():
+        key = tuple(str(row[a]) for a in axes)
+        labels[key] = " / ".join(str(row[a]) for a in varying) or "all"
+    return labels
+
+
+class _Ctx:
+    """The filter a table figure was drawn under, for its title and "no data" note."""
+
+    def __init__(self, outcome, subgroup, update):
+        from mival.stages.evaluate import SUBGROUP_ALL, UPDATE_NONE
+
+        self.outcome, self.subgroup, self.update = outcome, subgroup, update
+        parts = []
+        if outcome is not None:
+            parts.append(f"outcome={outcome}")
+        if subgroup not in (None, SUBGROUP_ALL):
+            parts.append(f"subgroup={subgroup}")
+        if update not in (None, UPDATE_NONE):
+            parts.append(f"update={update}")
+        self.tag = ", ".join(parts)
+
+    def title(self, base):
+        return f"{base} ({self.tag})" if self.tag else base
+
+
+def _slice(frame, curve, subgroup=None, update=None, outcome=None):
+    """Rows of one curve, one update, one subgroup and one outcome, plus the filter used.
+
+    ``subgroup``/``update`` default to the engine's whole-cohort and
+    not-recalibrated values. With several outcomes present, one must be chosen.
+    """
+    from mival.stages.evaluate import SUBGROUP_ALL, UPDATE_NONE
+
+    subgroup = SUBGROUP_ALL if subgroup is None else subgroup
+    update = UPDATE_NONE if update is None else update
+    rows = frame[frame["curve"] == curve]
+    if "subgroup" in rows.columns:
+        rows = rows[rows["subgroup"] == subgroup]
+    if "update" in rows.columns:
+        rows = rows[rows["update"] == update]
+    if "outcome" in rows.columns and len(rows):
+        present = sorted(set(rows["outcome"].astype(str)))
+        if outcome is None:
+            if len(present) > 1:
+                raise ValueError(
+                    f"{curve}: several outcomes present ({', '.join(present)}); pass outcome="
+                )
+            outcome = present[0]
+        rows = rows[rows["outcome"].astype(str) == str(outcome)]
+    # With no rows the outcome was never resolved: say so rather than omit it.
+    outcome = "any" if outcome is None else outcome
+    ctx = _Ctx(outcome, subgroup, update)
+    ctx.curve = curve
+    ctx.filters = f"subgroup={subgroup}, update={update}, outcome={outcome}"
+    return _numeric(rows, ("x", "value", "ci_lo", "ci_hi", "n", "n_events")), ctx
+
+
+def _warn_empty(rows, ctx, drawn, *axes):
+    """Say on the figure and to the caller that nothing could be drawn."""
+    import warnings
+
+    if drawn:
+        return
+    if len(rows):
+        text = f"no plottable points for {ctx.filters} ({ctx.curve}): all masked"
+    else:
+        text = f"no rows for {ctx.filters} ({ctx.curve})"
+    for axis in axes:
+        _empty_note(axis, text)
+    warnings.warn(text, stacklevel=3)
+
+
+def _arm_series(rows, metric):
+    """Yield (label, points) per arm for one metric, NaN points dropped."""
+    labels = _arm_labels(rows)
+    axes = [a for a in _ARM_AXES if a in rows.columns]
+    sub = rows[rows["metric"] == metric]
+    for key, part in sub.groupby([sub[a].astype(str) for a in axes], sort=True):
+        key = key if isinstance(key, tuple) else (key,)
+        part = part.dropna(subset=["x", "value"]).sort_values("x")
+        yield labels.get(tuple(key), "/".join(key)), part
+
+
+def _wide(rows, metrics):
+    """Per arm: x-aligned frame with one column per metric (NaN kept)."""
+    out = {}
+    labels = _arm_labels(rows)
+    axes = [a for a in _ARM_AXES if a in rows.columns]
+    for key, part in rows[rows["metric"].isin(metrics)].groupby(
+        [rows[a].astype(str) for a in axes], sort=True
+    ):
+        key = key if isinstance(key, tuple) else (key,)
+        wide = part.pivot_table(index="x", columns="metric", values="value", aggfunc="first")
+        out[labels.get(tuple(key), "/".join(key))] = wide.sort_index()
+    return out
+
+
+def _empty_note(axes, text="no data"):
+    axes.text(0.5, 0.5, text, ha="center", va="center", transform=axes.transAxes, color="0.5")
+
+
+def grid_roc_pr(frame, path, update=None, outcome=None, subgroup=None) -> Path:
+    """ROC (1 - specificity, sensitivity) and PR (sensitivity, PPV) from the threshold grid."""
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "threshold_grid", subgroup, update, outcome)
+    figure, (roc, pr) = pyplot.subplots(1, 2, figsize=(9.5, 4.2))
+    drawn = False
+    for label, wide in _wide(rows, ("sensitivity", "specificity", "ppv")).items():
+        if {"sensitivity", "specificity"} <= set(wide.columns):
+            pts = wide[["sensitivity", "specificity"]].dropna()
+            if len(pts):
+                roc.plot(1.0 - pts["specificity"].to_numpy(), pts["sensitivity"].to_numpy(),
+                         label=label)
+                drawn = True
+        if {"sensitivity", "ppv"} <= set(wide.columns):
+            pts = wide[["sensitivity", "ppv"]].dropna()
+            if len(pts):
+                pr.plot(pts["sensitivity"].to_numpy(), pts["ppv"].to_numpy(), label=label)
+    if drawn:
+        roc.plot([0, 1], [0, 1], linestyle=":", color="0.6")
+    roc.set_xlabel("1 - specificity")
+    roc.set_ylabel("sensitivity")
+    roc.set_title(ctx.title("ROC (threshold grid)"), fontsize=9)
+    pr.set_xlabel("sensitivity (recall)")
+    pr.set_ylabel("PPV (precision)")
+    pr.set_title(ctx.title("Precision-recall (threshold grid)"), fontsize=9)
+    for axis in (roc, pr):
+        axis.set_xlim(0, 1)
+        axis.set_ylim(0, 1.02)
+    if drawn:
+        roc.legend(fontsize=7)
+    _warn_empty(rows, ctx, drawn, roc, pr)
+    return _save(figure, path)
+
+
+def _band_line(axes, part, label, draw_band=True, **style):
+    """One arm's line with its interval band where the interval is present."""
+    (line,) = axes.plot(part["x"], part["value"], label=label, **style)
+    if draw_band:
+        ci = part.dropna(subset=["ci_lo", "ci_hi"])
+        if len(ci):
+            axes.fill_between(ci["x"], ci["ci_lo"], ci["ci_hi"], alpha=0.2,
+                              color=line.get_color(), linewidth=0)
+    return line
+
+
+def _net_benefit_axes(axes, rows, draw_band):
+    """Net benefit per arm, treat-all and treat-none; True if an arm was drawn."""
+    drawn = False
+    for label, part in _arm_series(rows, "net_benefit"):
+        if len(part):
+            _band_line(axes, part, label, draw_band)
+            drawn = True
+    if not drawn:
+        return False
+    for _, part in list(_arm_series(rows, "treat_all"))[:1]:
+        if len(part):
+            axes.plot(part["x"], part["value"], linestyle="--", color="0.4", label="treat all")
+    axes.axhline(0.0, color="black", linewidth=0.8, label="treat none")
+    axes.legend(fontsize=7)
+    return True
+
+
+def grid_decision_curve(frame, path, band=None, update=None, outcome=None,
+                        subgroup=None) -> Path:
+    """Net benefit with its interval, treat-all and treat-none.
+
+    ``band`` None draws the interval wherever one is present; False omits it.
+    """
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "threshold_grid", subgroup, update, outcome)
+    figure, axes = pyplot.subplots(figsize=(6.0, 4.4))
+    drawn = _net_benefit_axes(axes, rows, True if band is None else bool(band))
+    axes.set_xlabel("threshold probability")
+    axes.set_ylabel("net benefit")
+    axes.set_title(ctx.title("Decision curve"), fontsize=9)
+    _warn_empty(rows, ctx, drawn, axes)
+    return _save(figure, path)
+
+
+def calibration_band(frame, path, update=None, outcome=None, subgroup=None) -> Path:
+    """Observed risk against predicted risk with the interval band, over the risk histogram."""
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "calibration", subgroup, update, outcome)
+    dist, _ = _slice(frame, "risk_distribution", subgroup, update, outcome)
+    figure, (top, bottom) = pyplot.subplots(
+        2, 1, figsize=(5.6, 6.2), gridspec_kw={"height_ratios": [3, 1]}, sharex=True
+    )
+    drawn = False
+    for label, part in _arm_series(rows, "observed"):
+        if len(part):
+            _band_line(top, part, label)
+            drawn = True
+    if drawn:
+        top.plot([0, 1], [0, 1], linestyle=":", color="0.5")
+        top.legend(fontsize=7)
+    top.set_ylabel("observed risk")
+    top.set_xlim(0, 1)
+    top.set_ylim(0, 1)
+    top.set_title(ctx.title("Calibration"), fontsize=9)
+    wide = _wide(dist, ("events", "nonevents"))
+    width = 0.05 / max(len(wide), 1)
+    for k, (label, table) in enumerate(wide.items()):
+        total = table.sum(axis=1, min_count=1).dropna()
+        if len(total):
+            bottom.bar(total.index.to_numpy() + width * (k + 0.5), total.to_numpy(),
+                       width=width, align="center", label=label)
+    bottom.set_xlabel("predicted risk")
+    bottom.set_ylabel("records")
+    _warn_empty(rows, ctx, drawn, top)
+    return _save(figure, path)
+
+
+def regression_calibration_plot(frame, path, update=None, outcome=None,
+                                subgroup=None) -> Path:
+    """Observed mean truth against mean prediction per equal-count bin, with the identity line."""
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "regression_calibration", subgroup, update, outcome)
+    figure, axes = pyplot.subplots(figsize=(5.2, 5.0))
+    lows, highs = [], []
+    for label, part in _arm_series(rows, "observed"):
+        if not len(part):
+            continue
+        _band_line(axes, part, label, marker="o", markersize=3)
+        lows += [part["x"].min(), part["value"].min()]
+        highs += [part["x"].max(), part["value"].max()]
+    if lows:
+        lo, hi = min(lows), max(highs)
+        axes.plot([lo, hi], [lo, hi], linestyle=":", color="0.5")
+        axes.legend(fontsize=7)
+    axes.set_xlabel("mean predicted")
+    axes.set_ylabel("mean observed")
+    axes.set_title(ctx.title("Regression calibration"), fontsize=9)
+    _warn_empty(rows, ctx, bool(lows), axes)
+    return _save(figure, path)
+
+
+def km_plot(frame, path, update=None, outcome=None, subgroup=None) -> Path:
+    """Kaplan-Meier curves per risk quarter (colour), one line style per arm."""
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "km_by_risk_group", subgroup, update, outcome)
+    figure, axes = pyplot.subplots(figsize=(6.2, 4.4))
+    groups = sorted({m for m in rows["metric"].astype(str) if m.startswith("survival@")})
+    styles = ["-", "--", "-.", ":"]
+    cmap = pyplot.get_cmap("viridis")
+    drawn = False
+    for g, metric in enumerate(groups):
+        color = cmap(g / max(len(groups) - 1, 1) * 0.9)
+        for a, (label, part) in enumerate(_arm_series(rows, metric)):
+            if not len(part):
+                continue
+            axes.step(part["x"], part["value"], where="post", color=color,
+                      linestyle=styles[a % len(styles)],
+                      label=f"{metric.split('@')[1]} {label}")
+            drawn = True
+    if drawn:
+        axes.legend(fontsize=6, ncol=2)
+    axes.set_xlabel("days since ECG")
+    axes.set_ylabel("event-free survival")
+    axes.set_ylim(0, 1.02)
+    axes.set_title(ctx.title("Kaplan-Meier by predicted-risk quarter"), fontsize=9)
+    _warn_empty(rows, ctx, drawn, axes)
+    return _save(figure, path)
+
+
+def survival_decision_curve(frame, path, update=None, outcome=None, subgroup=None) -> Path:
+    """Censoring-weighted net benefit at the horizon against treat-all and treat-none."""
+    pyplot = _pyplot()
+    rows, ctx = _slice(frame, "survival_threshold_grid", subgroup, update, outcome)
+    figure, axes = pyplot.subplots(figsize=(6.0, 4.4))
+    drawn = _net_benefit_axes(axes, rows, True)
+    axes.set_xlabel("threshold probability")
+    axes.set_ylabel("net benefit")
+    axes.set_title(ctx.title("Survival decision curve"), fontsize=9)
+    _warn_empty(rows, ctx, drawn, axes)
+    return _save(figure, path)
+
+
+def forest_from_metrics(metrics, metric, path, update=None, outcome=None) -> Path:
+    """One metric across subgroup rows; a row with a ``reason`` is grey.
+
+    ``update`` and ``outcome`` select among several when the table has them;
+    with several outcomes present one must be chosen.
+    """
+    pyplot = _pyplot()
+    from mival.stages.evaluate import UPDATE_NONE
+
+    update = UPDATE_NONE if update is None else update
+    rows = metrics[metrics["metric"] == metric]
+    if "update" in rows.columns:
+        rows = rows[rows["update"].astype(str) == str(update)]
+    if "outcome" in rows.columns and len(rows):
+        present = sorted(set(rows["outcome"].astype(str)))
+        if outcome is None:
+            if len(present) > 1:
+                raise ValueError(
+                    f"{metric}: several outcomes present ({', '.join(present)}); pass outcome="
+                )
+            outcome = present[0]
+        rows = rows[rows["outcome"].astype(str) == str(outcome)]
+    rows = _numeric(rows, ("value", "ci_lo", "ci_hi"))
+    labels = _arm_labels(rows) if len(rows) else {}
+    axes_cols = [a for a in _ARM_AXES if a in rows.columns]
+    many = len(labels) > 1
+    figure, axes = pyplot.subplots(figsize=(6.5, 0.4 * max(len(rows), 1) + 1.5))
+    records = list(rows.to_dict("records"))
+    plotted = 0
+    for index, row in enumerate(records):
+        y = len(records) - index - 1
+        name = str(row.get("subgroup", ""))
+        if many:
+            name += " [" + labels.get(tuple(str(row[a]) for a in axes_cols), "") + "]"
+        reason = row.get("reason")
+        masked = reason is not None and not (isinstance(reason, float) and reason != reason) \
+            and str(reason) != ""
+        color = "0.65" if masked else "black"
+        value, lo, hi = row.get("value"), row.get("ci_lo"), row.get("ci_hi")
+        if value is not None and value == value:
+            axes.plot([value], [y], marker="o", color=color)
+            plotted += 1
+            if lo == lo and hi == hi and lo is not None and hi is not None:
+                axes.hlines(y, lo, hi, color=color if masked else "0.4", linewidth=1.2)
+        axes.text(0.0, y, name + (" *" if masked else ""), transform=axes.get_yaxis_transform(),
+                  ha="right", va="center", fontsize=8, color="0.45" if masked else "black")
+    axes.set_yticks([])
+    axes.set_ylim(-0.8, len(records) - 0.2)
+    axes.set_xlabel(metric)
+    outcome = "any" if outcome is None else outcome
+    tag = f", outcome={outcome}" + ("" if update == UPDATE_NONE else f", update={update}")
+    axes.set_title(f"{metric}: subgroup estimates{tag} (grey *: withheld, see reason)", fontsize=9)
+    if not plotted:
+        import warnings
+
+        text = f"no rows for metric={metric}, update={update}, outcome={outcome}"
+        if records:
+            text = f"no plottable points for metric={metric}: all masked"
+        _empty_note(axes, text)
+        warnings.warn(text, stacklevel=2)
+    return _save(figure, path)
+
+
+def stard_from_counts(stages, exclusions, path, title="STARD participant flow", side=()) -> Path:
+    """STARD flow from a counts table; a masked count ("<10") is printed as text."""
+    return stard_flow(stages, exclusions, path, title=title, side=side)

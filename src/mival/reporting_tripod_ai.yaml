@@ -1,0 +1,71 @@
+# TRIPOD+AI checklist (Collins et al., BMJ 2024), one entry per item.
+#
+# `files` are glob patterns over the export bundle's paths. An item is `auto`
+# when the bundle holds a file matching one of them, `manual` otherwise.
+# Patterns follow the design spec's guideline table (section 4); an item that
+# table does not name has no pattern and is always written by hand. 20c and
+# 23b are filled by the lab's pooling tool, not by a site bundle, so they have
+# no bundle pattern either.
+items:
+  - {item: "1", section: Title, title: "Title", files: []}
+  - {item: "2", section: Abstract, title: "Abstract", files: []}
+  - {item: "3a", section: Introduction, title: "Background: medical context and rationale", files: []}
+  - {item: "3b", section: Introduction, title: "Target population and intended purpose", files: []}
+  - {item: "3c", section: Introduction, title: "Known health inequalities", files: []}
+  - {item: "4", section: Introduction, title: "Objectives", files: []}
+  - {item: "5a", section: Methods, title: "Data sources", files: []}
+  - {item: "5b", section: Methods, title: "Dates of the collected data (collection period)",
+     files: ["table1/*.csv", "table1/*.xlsx"]}
+  - {item: "6a", section: Methods, title: "Participants: setting and centres", files: []}
+  - {item: "6b", section: Methods, title: "Eligibility criteria", files: []}
+  - {item: "6c", section: Methods, title: "Treatments received", files: []}
+  - {item: "7", section: Methods, title: "Data preparation and quality, similarity across groups",
+     files: ["exclusions/*.csv", "provenance/*_preprocess_manifest.json"]}
+  - {item: "8a", section: Methods, title: "Outcome definition and time horizon", files: []}
+  - {item: "8b", section: Methods, title: "Outcome assessors", files: []}
+  - {item: "8c", section: Methods, title: "Blinding of outcome assessment", files: []}
+  - {item: "9a", section: Methods, title: "Choice of predictors", files: []}
+  - {item: "9b", section: Methods, title: "Definition and measurement of predictors", files: []}
+  - {item: "9c", section: Methods, title: "Predictor assessors", files: []}
+  - {item: "10", section: Methods, title: "Sample size", files: ["metrics/*_sample_size.csv"]}
+  - {item: "11", section: Methods, title: "Missing data and reasons for omitting data",
+     files: ["exclusions/*.csv", "figures/*_stard_flow.png"]}
+  - {item: "12a", section: Methods, title: "Use of the data (partitioning)", files: []}
+  - {item: "12b", section: Methods, title: "Handling of predictors", files: []}
+  - {item: "12c", section: Methods, title: "Type of model and model-building steps", files: []}
+  - {item: "12d", section: Methods, title: "Heterogeneity across clusters", files: []}
+  - {item: "12e", section: Methods, title: "Performance measures and their rationale",
+     files: ["metrics/*_metrics.csv", "reporting/methods_draft.md"]}
+  - {item: "12f", section: Methods, title: "Model updating (recalibration)",
+     files: ["metrics/*_metrics.csv"]}
+  - {item: "12g", section: Methods, title: "How predictions were calculated",
+     files: ["provenance/*_models_manifest.json", "provenance/*_preprocess_manifest.json",
+             "reporting/methods_draft.md"]}
+  - {item: "13", section: Methods, title: "Class imbalance", files: []}
+  - {item: "14", section: Methods, title: "Fairness", files: ["metrics/*_metrics.csv"]}
+  - {item: "15", section: Methods, title: "Model output and thresholds", files: []}
+  - {item: "16", section: Methods, title: "Differences between development and evaluation data",
+     files: ["table1/*.csv", "metrics/*_metrics.csv"]}
+  - {item: "17", section: Methods, title: "Ethical approval", files: []}
+  - {item: "18a", section: Open science, title: "Funding", files: []}
+  - {item: "18b", section: Open science, title: "Conflicts of interest", files: []}
+  - {item: "18c", section: Open science, title: "Protocol", files: []}
+  - {item: "18d", section: Open science, title: "Registration", files: []}
+  - {item: "18e", section: Open science, title: "Data sharing", files: ["provenance/*_manifest.json"]}
+  - {item: "18f", section: Open science, title: "Code sharing", files: ["provenance/*_manifest.json"]}
+  - {item: "19", section: Patient and public involvement, title: "Patient and public involvement", files: []}
+  - {item: "20a", section: Results, title: "Participant flow", files: ["figures/*_stard_flow.png"]}
+  - {item: "20b", section: Results, title: "Participant characteristics",
+     files: ["table1/*.csv", "table1/*.xlsx"]}
+  - {item: "20c", section: Results, title: "Comparison with the development data", files: []}
+  - {item: "21", section: Results, title: "Participants and events in each analysis", files: []}
+  - {item: "22", section: Results, title: "Full model specification", files: []}
+  - {item: "23a", section: Results, title: "Model performance, including key subgroups",
+     files: ["metrics/*_metrics.csv"]}
+  - {item: "23b", section: Results, title: "Heterogeneity across clusters", files: []}
+  - {item: "24", section: Results, title: "Model updating results", files: ["metrics/*_metrics.csv"]}
+  - {item: "25", section: Discussion, title: "Interpretation", files: []}
+  - {item: "26", section: Discussion, title: "Limitations", files: []}
+  - {item: "27a", section: Discussion, title: "Handling of poor quality or unavailable input data", files: []}
+  - {item: "27b", section: Discussion, title: "User interaction and expertise", files: []}
+  - {item: "27c", section: Discussion, title: "Next steps for future research", files: []}

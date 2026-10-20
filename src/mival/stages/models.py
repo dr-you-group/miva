@@ -32,13 +32,15 @@ Three properties are enforced structurally rather than by convention:
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from mival.decode.outputs import output_scale
 from mival.gates import ContaminationReport, check_contamination, check_leakage
 from mival.modelcard import ModelCard, load_card
 from mival.pipeline.hashing import sha256_file
@@ -453,10 +455,21 @@ def _predict(
     card's decoded PR, QRS and QT).
     """
     forward = _adapter_method(adapter, "forward", card)
+    # A probe-headed handle over a frozen backbone is offered the paths first,
+    # so its representations come from the arm's feature cache; every other
+    # handle — and every adapter without the hook — returns None and takes
+    # the forward() path below unchanged. A fitted head reads features only,
+    # never covariates, which is also what forward() does with one.
+    cached = getattr(adapter, "forward_cached", None)
     chunks: List[np.ndarray] = []
     for start in range(0, len(records), batch_size):
         window = records[start : start + batch_size]
-        batch = loader([record.tensor_path for record in window])
+        paths = [record.tensor_path for record in window]
+        probs = cached(handle, paths, loader) if callable(cached) else None
+        if probs is not None:
+            chunks.append(_checked_scores(np.asarray(probs, dtype=np.float64), column, window, card))
+            continue
+        batch = loader(paths)
         names = _covariates(card)
         if names:
             covariates = np.array(
@@ -466,18 +479,51 @@ def _predict(
             probs = np.asarray(forward(handle, batch, covariates=covariates), dtype=np.float64)
         else:
             probs = np.asarray(forward(handle, batch), dtype=np.float64)
-        if column is not None:
-            probs = probs[:, column]
-        probs = probs.ravel()
-        if probs.size != len(window):
-            raise ValueError(
-                f"adapter {card.adapter!r} returned {probs.size} probabilities for a batch "
-                f"of {len(window)} records"
-            )
-        chunks.append(probs)
+        chunks.append(_checked_scores(probs, column, window, card))
     if not chunks:
         return np.empty(0, dtype=np.float64)
     return np.concatenate(chunks)
+
+
+def _checked_scores(
+    probs: np.ndarray, column: Optional[int], window: Sequence[Record], card: ModelCard
+) -> np.ndarray:
+    if column is not None:
+        probs = probs[:, column]
+    probs = probs.ravel()
+    if probs.size != len(window):
+        raise ValueError(
+            f"adapter {card.adapter!r} returned {probs.size} probabilities for a batch "
+            f"of {len(window)} records"
+        )
+    return probs
+
+
+@contextmanager
+def _feature_cache(adapter: Any, arm: "Arm") -> Iterator[Dict[str, Any]]:
+    """Open the adapter's feature cache around one group of a linear_probe arm.
+
+    Only ``linear_probe`` gets a scope: it is the one mode whose backbone stays
+    as published through every fit, so it is the one mode for which a
+    representation computed in one fold is the representation in the next.
+    The yielded mapping is filled, on exit, with what goes into
+    ``training.feature_cache`` of the train log, so a manifest reader can see
+    whether a run reused representations. It stays empty for other modes.
+    """
+    record: Dict[str, Any] = {}
+    scope = getattr(adapter, "feature_cache_scope", None)
+    if arm.training_mode != "linear_probe":
+        yield record
+        return
+    if not callable(scope):
+        record.update(
+            {"enabled": False, "used": False, "reason": "the adapter offers no feature cache"}
+        )
+        yield record
+        return
+    with scope() as status:
+        yield record
+        record.update(status())
 
 
 def _fit_payload(
@@ -571,6 +617,12 @@ class ModelsStage(Stage):
         """
         return _registry_files(Path(str((spec or {}).get("registry", ""))))
 
+    def config_digests(self, spec: Mapping[str, Any]) -> Dict[str, str]:
+        """A checksum per card whose platform runtime override applies here (none elsewhere)."""
+        from mival.runtime_platform import override_digests
+
+        return override_digests(Path(str((spec or {}).get("registry", ""))), "runtime_override:")
+
     # -- adapters ----------------------------------------------------------
 
     def _adapter(self, name: str) -> Any:
@@ -599,6 +651,13 @@ class ModelsStage(Stage):
                 raise ValueError(
                     f"no ModelCard for {model_id!r} in {spec.registry}; cards found: "
                     f"{sorted(cards)}"
+                )
+        for model_id in sorted(wanted):
+            override = cards[model_id][0].runtime_override
+            if override:
+                warnings.append(
+                    f"{model_id}: runtime override {override['name']!r} applied for platform "
+                    f"{override['platform']!r}: {'; '.join(override['changes']) or 'no changes'}"
                 )
         for arm in spec.arms:
             card = cards[arm.model_id][0]
@@ -640,18 +699,21 @@ class ModelsStage(Stage):
                 )
             adapter = self._adapter(card.adapter)
             for group_key, group in _group_by_recipe(arm_records):
-                entry, group_outputs, group_keys, written, contacts = self._run_group(
-                    ctx=ctx,
-                    spec=spec,
-                    arm=arm,
-                    card=card,
-                    card_path=card_path,
-                    adapter=adapter,
-                    records=group,
-                    recipe_id=group_key[0],
-                    perturbation_id=group_key[1],
-                    contamination=report,
-                )
+                with _feature_cache(adapter, arm) as cache_record:
+                    entry, group_outputs, group_keys, written, contacts = self._run_group(
+                        ctx=ctx,
+                        spec=spec,
+                        arm=arm,
+                        card=card,
+                        card_path=card_path,
+                        adapter=adapter,
+                        records=group,
+                        recipe_id=group_key[0],
+                        perturbation_id=group_key[1],
+                        contamination=report,
+                    )
+                if cache_record:
+                    entry["training"]["feature_cache"] = dict(cache_record)
                 outputs.extend(group_outputs)
                 run_keys.extend(group_keys)
                 log_entries.append(entry)
@@ -925,8 +987,19 @@ class ModelsStage(Stage):
                 # Which interpreter and framework build the card was written
                 # against; a result is only reproducible against that.
                 "runtime": dict(card.runtime),
+                # Only when a platform override was applied, so a run without
+                # one writes the same record as before overrides existed.
+                **({"runtime_override": dict(card.runtime_override)} if card.runtime_override else {}),
             },
             "training": training,
+            # What pred_value/prob is on, and for a survival card the horizon
+            # its risk is by: evaluate reports a survival arm's absolute-risk
+            # metrics only for a probability, and only at that horizon.
+            "output_scale": output_scale(card.output),
+            "output_horizon_days": (
+                None if card.output.get("horizon_days") is None
+                else float(card.output["horizon_days"])
+            ),
             "thresholds": {name: fit.to_dict() for name, fit in thresholds.items()},
             "primary_threshold_policy": None if arm.is_regression or arm.is_survival else PRIMARY_THRESHOLD_POLICY,
             "contamination": contamination.to_dict(),

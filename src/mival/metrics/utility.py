@@ -13,9 +13,10 @@ clinician willing to act at a 5% risk is stating that one missed STEMI is
 worth 19 unnecessary work-ups. The two reference strategies are treat-all
 (intervene on everyone) and treat-none (net benefit identically zero).
 
-For STEMI the clinically plausible band is low — roughly 1-10% (spec §4.5) —
-because the cost of a miss is large. A model can have an excellent AUROC and
-still sit below treat-all across that whole band, which is the case this
+Which thresholds are clinically plausible is a judgement per outcome, so it
+belongs to the study (``evaluate.decision_thresholds``), not to this module:
+there is no default set. A model can have an excellent AUROC and still sit
+below treat-all across the whole plausible range, which is the case this
 category exists to detect.
 """
 
@@ -26,9 +27,6 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 
 from ._common import as_arrays
-
-#: Spec §4.5: the clinically plausible band for STEMI is the low end.
-DEFAULT_DECISION_THRESHOLDS: Tuple[float, ...] = (0.01, 0.02, 0.05, 0.10)
 
 #: Metric name stems; the reported names carry the threshold as a suffix,
 #: e.g. ``net_benefit@0.05``. The threshold is a parameter of the metric, not
@@ -90,7 +88,7 @@ def decision_curve(
 def utility_metrics(
     y_true: Sequence,
     y_prob: Sequence,
-    thresholds: Sequence[float] = DEFAULT_DECISION_THRESHOLDS,
+    thresholds: Sequence[float] = (),
 ) -> Dict[str, float]:
     """All of category 3 for one slice, keyed ``<stem>@<threshold>``."""
     values: Dict[str, float] = {}

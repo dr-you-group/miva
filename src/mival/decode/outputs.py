@@ -26,6 +26,37 @@ from mival.decode.transforms import apply_transform
 
 DECODED_TYPES = ("regression", "risk_score", "survival_curve", "mtlr", "segmentation_mask")
 
+#: What a decoded value is, by ``output.type``. ``probability``: a risk on
+#: [0, 1] (a class probability, or for a survival card the risk by its
+#: horizon); ``risk_score``: higher is riskier, with no baseline hazard behind
+#: it, so it ranks but is not a risk; ``value``: a continuous quantity;
+#: ``intervals``: per-record PR/QRS/QT durations.
+OUTPUT_SCALES = {
+    "logits": "probability",
+    "softmax": "probability",
+    "sigmoid": "probability",
+    "probability": "probability",
+    "survival_curve": "probability",
+    "mtlr": "probability",
+    "risk_score": "risk_score",
+    "regression": "value",
+    "segmentation_mask": "intervals",
+}
+
+
+def output_scale(output: Mapping[str, Any]) -> str:
+    """The scale of what a card's output decodes to (``OUTPUT_SCALES``).
+
+    A card without ``output.type`` is ``logits``, the adapters' default.
+    """
+    kind = (output or {}).get("type", "logits")
+    try:
+        return OUTPUT_SCALES[kind]
+    except KeyError:
+        raise ValueError(
+            f"unknown output.type {kind!r}; known: {sorted(OUTPUT_SCALES)}"
+        ) from None
+
 
 def risk_from_conditional_survival(p: np.ndarray, bin_days: float, horizon_days: float) -> np.ndarray:
     """1 - S(horizon) from per-interval conditional survival; a partial interval is geometric."""

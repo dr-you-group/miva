@@ -464,6 +464,15 @@ class MisclassifyStage(Stage):
             f"card:{path.stem}": path for path in sorted(directory.glob("*.json"))
         }
 
+    def config_digests(self, spec: Mapping[str, Any]) -> Dict[str, str]:
+        """A checksum per card whose platform runtime override applies here, as in the models stage."""
+        registry = ((spec or {}).get("attribution") or {}).get("registry")
+        if not registry:
+            return {}
+        from mival.runtime_platform import override_digests
+
+        return override_digests(Path(str(registry)), "runtime_override:")
+
     def required_inputs(self) -> tuple:
         """Only predictions.
 
@@ -491,7 +500,7 @@ class MisclassifyStage(Stage):
 
         recorded: Dict[Tuple[str, ...], float] = {}
         if TRAIN_LOG_INPUT in ctx.inputs:
-            recorded, _ = recorded_thresholds_and_contamination(
+            recorded, _, _ = recorded_thresholds_and_contamination(
                 ctx.inputs[TRAIN_LOG_INPUT], spec.threshold.policy, warnings
             )
         thresholds = fit_operating_thresholds(predictions, spec.threshold, warnings, recorded)

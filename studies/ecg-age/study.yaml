@@ -24,6 +24,10 @@ stages:
     registry: registry/age
     pad_policy: zero  # Lima centres 10 s in 4096 samples at 400 Hz (pad_anchor: center)
 
+  describe:
+    age_bands: [50, 65, 80]
+    conditions: []  # v1은 동반질환을 읽지 않는다 (논문 한계)
+
   models:
     registry: registry/age
     batch_size: 64
@@ -33,6 +37,13 @@ stages:
 
   evaluate:
     outcomes: {age: null}
-    regression_cuts: {value: [65]}
+    regression_cuts: {value: [{value: 65, op: ">"}]}
     bootstrap_replicates: 2000
     figures: true
+    subgroups: [sex, age_band, device_manufacturer]
+    net_benefit_grid: {start: 0.01, stop: 0.99, step: 0.01}
+    min_events: 10
+
+  export:
+    min_cell: 10
+    prespecified_subgroups: [sex, age_band]  # 사전 지정 하위군(spec 1.3). 나머지 subgroups(device_manufacturer)는 탐색적

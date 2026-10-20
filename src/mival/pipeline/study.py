@@ -15,18 +15,27 @@ are merged into the study before anything reads it, so each stage's spec and
 config_hash are exactly what they would be with the values written inline. A
 key set in both places is an error: the study would otherwise silently run
 with whichever value won.
+
+A few site keys say how to run rather than what to compute (``gpus``: which
+GPUs the models stage may spread its arms over; ``workers``: how many CPU
+processes the evaluation stage spreads its slices over). They are kept out of
+every stage spec and land in ``Study.execution``, so a site with eight GPUs
+and one with none get the same config_hash for the same study.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Union
+from typing import Any, Dict, Mapping, Tuple, Union
 
 from mival.placeholders import expand
 
 _REQUIRED = ("study_id", "site")
+
+#: Site-config keys that set how the study runs, never what it computes.
+EXECUTION_KEYS = ("gpus", "workers")
 
 
 def _load_mapping(path: Path) -> Dict[str, Any]:
@@ -57,6 +66,7 @@ class Study:
     root: Path
     seed: Any
     stages: Mapping[str, Any]
+    execution: Mapping[str, Any] = field(default_factory=dict)
 
     def stage_spec(self, stage: str) -> Dict[str, Any]:
         """The spec for one stage, always as a mapping.
@@ -76,11 +86,14 @@ class Study:
         return spec
 
 
-def _merge_site_config(body: Dict[str, Any], target: Path) -> Dict[str, Any]:
-    """``body`` with the file named by its ``site_config`` merged in (see the module docstring)."""
+def _merge_site_config(body: Dict[str, Any], target: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``body`` with the file named by its ``site_config`` merged in, and the execution keys.
+
+    See the module docstring for both.
+    """
     reference = body.pop("site_config", None)
     if reference is None:
-        return body
+        return body, {}
     path = Path(expand(str(reference), target))
     if not path.is_absolute():
         path = target.parent / path
@@ -91,6 +104,7 @@ def _merge_site_config(body: Dict[str, Any], target: Path) -> Dict[str, Any]:
         if "site" in body:
             raise ValueError(f"{target}: site is set both here and in {path}")
         body["site"] = site.pop("site")
+    execution = {key: site.pop(key) for key in EXECUTION_KEYS if key in site}
     stages = body.setdefault("stages", {})
     for stage, settings in site.items():
         if not isinstance(settings, dict):
@@ -102,14 +116,14 @@ def _merge_site_config(body: Dict[str, Any], target: Path) -> Dict[str, Any]:
         if clash:
             raise ValueError(f"{target}: {stage}.{', '.join(clash)} set both here and in {path}")
         spec.update(settings)
-    return body
+    return body, execution
 
 
 def load_study(path: Union[str, Path]) -> Study:
     target = Path(path)
     if target.is_dir():
         target = target / "study.yaml"
-    body = _merge_site_config(_load_mapping(target), target)
+    body, execution = _merge_site_config(_load_mapping(target), target)
     for key in _REQUIRED:
         if key not in body:
             raise ValueError(f"{target}: {key} is required")
@@ -122,4 +136,5 @@ def load_study(path: Union[str, Path]) -> Study:
         root=target.parent,
         seed=body.get("seed"),
         stages=stages,
+        execution=execution,
     )

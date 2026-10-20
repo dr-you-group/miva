@@ -39,13 +39,11 @@ from .discrimination import (
     auroc,
     confusion_counts,
     discrimination_metrics,
-    discrimination_slope,
     pr_points,
     roc_points,
 )
 from .regression import regression_metrics
 from .utility import (
-    DEFAULT_DECISION_THRESHOLDS,
     decision_curve,
     net_benefit,
     net_benefit_treat_all,
@@ -94,7 +92,7 @@ def compute_metrics(
     y_true: Sequence,
     y_prob: Sequence,
     threshold: float,
-    decision_thresholds: Sequence[float] = DEFAULT_DECISION_THRESHOLDS,
+    decision_thresholds: Sequence[float] = (),
     murphy_bins: Optional[int] = DEFAULT_MURPHY_BINS,
     n_knots: int = DEFAULT_KNOTS,
 ) -> Dict[str, float]:
@@ -114,7 +112,6 @@ def compute_metrics(
 __all__ = [
     "CALIBRATION",
     "CLINICAL_UTILITY",
-    "DEFAULT_DECISION_THRESHOLDS",
     "DEFAULT_KNOTS",
     "DEFAULT_MURPHY_BINS",
     "DISCRIMINATION",
@@ -134,7 +131,6 @@ __all__ = [
     "confusion_counts",
     "decision_curve",
     "discrimination_metrics",
-    "discrimination_slope",
     "eci",
     "flexible_calibration_curve",
     "logistic_recalibration",

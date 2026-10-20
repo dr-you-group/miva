@@ -23,7 +23,7 @@
         "sha256": "67dd4197ee536d413cc786f53bb4819bda0fb8dd2935947d4af02064ec9eb165",
         "role": "full",
         "derived_from": {
-          "uri": "/data/mi-val/models/cavalab-deepsurv-code15/Code15 ResNet DeepSurv no Dem.pt",
+          "file": "Code15 ResNet DeepSurv no Dem.pt",
           "sha256": "a72c1a9d5ae364e4eac38f825aade99df2e364d329cf91517e27a341dfb3a7f8",
           "by": "mival_wrap_cavalab.convert"
         }

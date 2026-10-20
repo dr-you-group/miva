@@ -65,6 +65,9 @@ class SourceMetadata:
     sampling_rate_hz: float
     n_samples: int
     unit: Optional[str]
+    # Device tags, for the site-results description only; they never enter a recipe.
+    manufacturer: Optional[str] = None
+    model_name: Optional[str] = None
 
     @property
     def duration_s(self) -> float:

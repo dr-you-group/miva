@@ -43,12 +43,18 @@ FILE_KINDS = ("machine_measurement", "measurement_file")
 #: Person covariates every derived kind writes, for cards that take them (L2-3).
 COVARIATE_COLUMNS = ("cov_age_years", "cov_sex_male")
 MALE_CONCEPT_ID = 8507
+FEMALE_CONCEPT_ID = 8532
+#: Written once per run for every ECG the query returned, before any exclusion,
+#: so a later stage can describe the people the cohort left out. It stays at
+#: the site: it is the only artifact that holds age and sex of excluded ECGs.
+ECG_ATTRIBUTES = "ecg_attributes.parquet"
+ECG_ATTRIBUTE_COLUMNS = ("image_occurrence_id", "person_id", "ecg_year", "age_years", "sex")
 #: Plausible machine-measured intervals in ms; outside is a device artefact or
 #: a missing-value code (29999, 65535, ...).
 INTERVAL_BOUNDS = {"label_pr": (60.0, 400.0), "label_qrs": (40.0, 250.0), "label_qt": (200.0, 700.0)}
-#: Out-of-hospital deaths in MIMIC-IV are recorded up to one year after the
-#: last hospital contact; follow-up past that is not observed.
-DEATH_FOLLOW_UP_DAYS = 365
+#: label_source.follow_up_after_last_visit_days default: how long after the last
+#: hospital contact a death is still taken as recorded (death_within).
+DEFAULT_FOLLOW_UP_DAYS = 365
 
 COHORT_INDEX_COLUMNS = (
     "image_occurrence_id", "person_id", "local_path", "index_datetime",
@@ -77,15 +83,16 @@ _SQLSERVER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0
 class RetrieveSpec:
     dsn_env: str
     schema: str
-    label_concept_id: int
+    label_concept_id: Optional[int]  # required for label_kind measurement, unused otherwise
     modality_concept_id: int
     window_days: int
     window_days_sens2: int
     implausible_below: Optional[float]  # None: no lower bound, nothing is excluded as implausible
     local_path_root: Optional[str]
     require_local_file: bool
-    primary_cutoff: float = 40.0   # label_primary = value <= primary_cutoff
-    sens1_cutoff: float = 50.0     # label_sens1 = value < sens1_cutoff
+    primary_cutoff: Optional[float] = None  # label_primary = value <= primary_cutoff; None: no class labels
+    sens1_cutoff: Optional[float] = None    # label_sens1 = value < sens1_cutoff
+    follow_up_after_last_visit_days: int = DEFAULT_FOLLOW_UP_DAYS
     label_kind: str = "measurement"
     horizon_days: int = 365
     measurements_path: Optional[str] = None
@@ -117,25 +124,29 @@ class RetrieveSpec:
             raise ValueError(f"retrieve.label_source.kind {kind!r} is not one of {list(LABEL_KINDS)}")
         if kind in FILE_KINDS and not source.get("path"):
             raise ValueError(f"retrieve.label_source.path is required for kind {kind!r}")
+        if kind == "measurement" and body.get("label_concept_id") is None:
+            raise ValueError("retrieve.label_concept_id is required")
         per_person, rule = _ecg_selection(body, kind)
         return cls(
             label_kind=kind,
             horizon_days=int(source.get("horizon_days", 365)),
+            follow_up_after_last_visit_days=int(
+                source.get("follow_up_after_last_visit_days", DEFAULT_FOLLOW_UP_DAYS)),
             measurements_path=None if source.get("path") is None else str(source["path"]),
             per_person=per_person,
             selection_rule=rule,
             dsn_env=str(body["dsn_env"]),
             dbms=dbms,
             schema=schema,
-            label_concept_id=int(body.get("label_concept_id", 3027172)),
+            label_concept_id=None if body.get("label_concept_id") is None else int(body["label_concept_id"]),
             modality_concept_id=int(body["modality_concept_id"]),
             window_days=int(body.get("window_days", 7)),
             window_days_sens2=int(body.get("window_days_sens2", 30)),
             implausible_below=None if body.get("implausible_below", 5) is None else float(body.get("implausible_below", 5)),
             local_path_root=None if root in (None, "") else str(root),
             require_local_file=bool(body.get("require_local_file", True)),
-            primary_cutoff=float(body.get("primary_cutoff", 40)),
-            sens1_cutoff=float(body.get("sens1_cutoff", 50)),
+            primary_cutoff=None if body.get("primary_cutoff") is None else float(body["primary_cutoff"]),
+            sens1_cutoff=None if body.get("sens1_cutoff") is None else float(body["sens1_cutoff"]),
         )
 
     def params(self, window_days: int) -> dict:
@@ -209,6 +220,7 @@ class RetrieveStage(Stage):
         )
         frame["local_path"] = frame["local_path"].map(lambda p: resolve_local_path(p, spec.local_path_root))
 
+        attributes_path = write_ecg_attributes(ctx, frame)
         kept = exclude(frame, spec, ctx.ledger)
         if spec.one_per_person:
             kept = one_per_person(kept, ctx.seed, ctx.ledger, spec.selection_rule)
@@ -218,8 +230,8 @@ class RetrieveStage(Stage):
         sql_paths = [write_sql(ctx, sql, spec.params(days), f"window_{days}")
                      for days in (spec.window_days, spec.window_days_sens2)]
         sql_paths.append(write_sql(ctx, snapshot_sql, snapshot_params, "label_snapshot"))
-        summary_path = write_summary(ctx, frame, kept, snapshot)
-        return StageResult(outputs=[index_path, summary_path, *sql_paths],
+        summary_path = write_summary(ctx, spec, frame, kept, snapshot)
+        return StageResult(outputs=[index_path, summary_path, attributes_path, *sql_paths],
                            counts={"in": len(frame), "out": len(kept)})
 
 
@@ -234,6 +246,7 @@ class RetrieveStage(Stage):
         frame = frame.assign(label_datetime=None, label_delta_days=np.nan, label_primary=np.nan,
                              label_sens1=np.nan, label_sens2=np.nan, label_sens3=np.nan)
         frame = derive_labels(frame, spec)
+        attributes_path = write_ecg_attributes(ctx, frame)
         kept = exclude_derived(frame, spec, ctx.ledger)
         if spec.one_per_person:
             kept = one_per_person(kept, ctx.seed, ctx.ledger, spec.selection_rule)
@@ -257,7 +270,7 @@ class RetrieveStage(Stage):
             payload["events"] = int(kept["label_event"].sum())
         summary_path = ctx.layout.artifact(SUMMARY)
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return StageResult(outputs=[index_path, summary_path, sql_path],
+        return StageResult(outputs=[index_path, summary_path, attributes_path, sql_path],
                            counts={"in": len(frame), "out": len(kept)})
 
 
@@ -280,7 +293,7 @@ def derive_labels(frame, spec: RetrieveSpec):
         death = pandas.to_datetime(frame["death_date"])
         last = pandas.to_datetime(frame["last_visit_end"])
         end = np.minimum(index + pandas.Timedelta(days=spec.horizon_days),
-                         last + pandas.Timedelta(days=DEATH_FOLLOW_UP_DAYS))
+                         last + pandas.Timedelta(days=spec.follow_up_after_last_visit_days))
         event = death.notna() & (death <= end)
         stop = death.where(event, end)
         frame["label_event"] = event.astype(float).where(last.notna())
@@ -398,20 +411,28 @@ def one_per_person(frame, seed, ledger, rule="random"):
     return ordered[mask]
 
 
-def resolve_local_path(cdm_path: Any, root: Optional[str]) -> Optional[str]:
+_PATH_SEPARATORS = re.compile(r"[\\/]+")
+
+
+def resolve_local_path(cdm_path: Any, root: Optional[str], path_type: Callable = Path) -> Optional[str]:
     """The DICOM file of one ECG: the CDM local_path itself, or re-rooted under ``root``.
 
     With no root the CDM path is used as it is, for a site whose CDM already
-    holds paths readable on this server. With a root, the part after 'files/'
-    is placed under it (ledger A-1), for a CDM built where the files lived
-    elsewhere.
+    holds paths readable on this server. With a root, the part after the first
+    'files' directory is placed under it (ledger A-1), for a CDM built where
+    the files lived elsewhere. The CDM path may separate its parts with '/' or
+    '\\' in any mix, and the result is joined the way ``path_type`` joins
+    paths (this machine's ``Path`` unless a test names another).
     """
     if cdm_path is None or cdm_path != cdm_path or not str(cdm_path).strip():
         return None
     if root is None:
         return str(cdm_path).strip()
-    _, sep, tail = str(cdm_path).partition("/files/")
-    return str(Path(root) / "files" / tail) if sep else None
+    parts = _PATH_SEPARATORS.split(str(cdm_path).strip())
+    if "files" not in parts[:-1]:
+        return None
+    tail = parts[parts.index("files") + 1:]
+    return str(path_type(root).joinpath("files", *tail))
 
 
 def _implausible(frame, spec: RetrieveSpec):
@@ -452,14 +473,17 @@ def attach_labels(frame, spec: RetrieveSpec):
     import numpy as np
 
     value, wide = frame["label_value"], frame["label_value_sens2"]
-    # Nullable labels are float with NaN: parquet round-trips that, and the
-    # models stage already reads NaN as "no label".
-    return frame.assign(
-        label_primary=(value <= spec.primary_cutoff).astype("int64"),
-        label_sens1=(value < spec.sens1_cutoff).astype("int64"),
-        label_sens2=(wide <= spec.primary_cutoff).astype("float64").where(wide.notna()),
-        label_sens3=np.nan,
-    )
+    # Each class label comes from its own cutoff; a label whose cutoff the
+    # study does not give stays NaN. Nullable labels are float with NaN:
+    # parquet round-trips that, and the models stage already reads NaN as
+    # "no label".
+    primary, sens1, sens2 = (np.nan,) * 3
+    if spec.primary_cutoff is not None:
+        primary = (value <= spec.primary_cutoff).astype("int64")
+        sens2 = (wide <= spec.primary_cutoff).astype("float64").where(wide.notna())
+    if spec.sens1_cutoff is not None:
+        sens1 = (value < spec.sens1_cutoff).astype("int64")
+    return frame.assign(label_primary=primary, label_sens1=sens1, label_sens2=sens2, label_sens3=np.nan)
 
 
 def read_snapshot(frame) -> dict:
@@ -492,7 +516,7 @@ def write_sql(ctx: StageContext, sql: str, params: Mapping[str, Any], name: str)
     return path
 
 
-def write_summary(ctx: StageContext, frame, kept, snapshot: Mapping[str, Any]) -> Path:
+def write_summary(ctx: StageContext, spec: RetrieveSpec, frame, kept, snapshot: Mapping[str, Any]) -> Path:
     quantiles = kept["label_value"].quantile([0.05, 0.25, 0.5, 0.75, 0.95])
     payload = {
         "snapshot": dict(snapshot),
@@ -501,13 +525,38 @@ def write_summary(ctx: StageContext, frame, kept, snapshot: Mapping[str, Any]) -
         "n_out": int(len(kept)),
         "n_persons_out": int(kept["person_id"].nunique()),
         "excluded": ctx.ledger.counts(),
-        "positives": {name: int(kept[name].sum()) for name in ("label_primary", "label_sens1", "label_sens2")},
         "label_value_quantiles": {f"p{int(q * 100)}": float(v) for q, v in quantiles.items()},
         "label_delta_days": {str(k): int(v) for k, v in kept["label_delta_days"].value_counts().sort_index().items()},
     }
+    # A label is reported when its cutoff is set, even if no ECG is kept (count 0).
+    positives = {name: int(kept[name].sum())
+                 for name, cutoff in (("label_primary", spec.primary_cutoff), ("label_sens1", spec.sens1_cutoff),
+                                      ("label_sens2", spec.primary_cutoff)) if cutoff is not None}
+    if positives:
+        payload["positives"] = positives
     path = ctx.layout.artifact(SUMMARY)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
+
+
+def write_ecg_attributes(ctx: StageContext, frame) -> Path:
+    """Age at the ECG and sex of every ECG the query returned, excluded or not."""
+    import numpy as np
+    import pandas
+
+    index = pandas.to_datetime(frame["index_datetime"])
+    birth = pandas.to_numeric(frame["year_of_birth"], errors="coerce") if "year_of_birth" in frame \
+        else pandas.Series(np.nan, index=frame.index)
+    gender = frame["gender_concept_id"] if "gender_concept_id" in frame else pandas.Series(None, index=frame.index, dtype=object)
+    sex = gender.map({MALE_CONCEPT_ID: "M", FEMALE_CONCEPT_ID: "F"}).fillna("unknown")
+    table = pandas.DataFrame({
+        "image_occurrence_id": frame["image_occurrence_id"],
+        "person_id": frame["person_id"],
+        "ecg_year": index.dt.year,
+        "age_years": (index.dt.year - birth).astype(float),
+        "sex": sex,
+    })
+    return write_table(table.to_dict("records"), ctx.layout.artifact(ECG_ATTRIBUTES), ECG_ATTRIBUTE_COLUMNS)
 
 
 def _decimals_to_float(frame):

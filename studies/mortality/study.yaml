@@ -6,7 +6,9 @@ stages:
   retrieve:
     require_local_file: true
     ecg_selection: {per_person: one, rule: random}
-    label_source: {kind: death_within, horizon_days: 365}
+    # follow_up_after_last_visit_days: 마지막 방문 뒤 이 일수까지만 사망이 기록된다고 본다(그 뒤는 검열).
+    # 엔진 기본값과 같은 365를 적어 둔다: 기관이 어떤 사망 정의로 돌렸는지 study에 남도록.
+    label_source: {kind: death_within, horizon_days: 365, follow_up_after_last_visit_days: 365}
 
   profile:
     test_fraction: 0.2
@@ -24,6 +26,11 @@ stages:
     registry: registry/survival
     pad_policy: reject
 
+  describe:
+    age_bands: [50, 65, 80]
+    conditions: []  # v1은 동반질환을 읽지 않는다 (논문 한계)
+    outcome: label_event
+
   models:
     registry: registry/survival
     batch_size: 64
@@ -36,3 +43,10 @@ stages:
     horizons_days: [365]
     bootstrap_replicates: 2000
     figures: true
+    subgroups: [sex, age_band, device_manufacturer]
+    net_benefit_grid: {start: 0.01, stop: 0.99, step: 0.01}
+    min_events: 10
+
+  export:
+    min_cell: 10
+    prespecified_subgroups: [sex, age_band]  # 사전 지정 하위군(spec 1.3). 나머지 subgroups(device_manufacturer)는 탐색적

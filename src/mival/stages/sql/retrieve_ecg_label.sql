@@ -10,8 +10,11 @@ select
     i.image_occurrence_date                          as index_datetime,
     m.measurement_datetime                           as label_datetime,
     m.measurement_date - i.image_occurrence_date     as label_delta_days,
-    m.value_as_number                                as label_value
+    m.value_as_number                                as label_value,
+    p.year_of_birth,
+    p.gender_concept_id
 from {schema}.image_occurrence i
+left join {schema}.person p on p.person_id = i.person_id
 left join lateral (
     select m.measurement_datetime, m.measurement_date, m.value_as_number
     from {schema}.measurement m

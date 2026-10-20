@@ -331,11 +331,17 @@ def recorded_thresholds_and_contamination(
     and ran the contamination gate against each ModelCard. Both belong to the
     run that produced the predictions, so when the log is available it is read
     rather than reconstructed.
+
+    Returns ``(thresholds, contaminated, scales)``. ``scales`` maps each arm
+    to ``{"scale": output_scale, "horizon_days": output_horizon_days}``
+    (``mival.decode.outputs.output_scale``; the horizon is None for a card
+    without one), and has no entry for an arm whose log line predates it.
     """
     import json
 
     thresholds: Dict[Tuple[str, ...], float] = {}
     contaminated: Dict[Tuple[str, ...], bool] = {}
+    scales: Dict[Tuple[str, ...], Dict[str, Any]] = {}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -351,8 +357,15 @@ def recorded_thresholds_and_contamination(
         )
         fit = (entry.get("thresholds") or {}).get(policy)
         flag = bool((entry.get("contamination") or {}).get("flag", False))
+        scale = entry.get("output_scale")
+        horizon = entry.get("output_horizon_days")
         for arm in arms:
             contaminated[arm] = flag
+            if scale is not None:
+                scales[arm] = {
+                    "scale": str(scale),
+                    "horizon_days": None if horizon is None else float(horizon),
+                }
             if fit is not None and fit.get("value") is not None:
                 thresholds[arm] = float(fit["value"])
             elif entry.get("primary_threshold_policy") is None:
@@ -364,4 +377,4 @@ def recorded_thresholds_and_contamination(
                     f"train_log has no {policy!r} threshold for arm {arm}; it will be refitted "
                     "from the dev predictions"
                 )
-    return thresholds, contaminated
+    return thresholds, contaminated, scales

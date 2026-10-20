@@ -37,6 +37,7 @@ from mival.adapters._training import (
 )
 from mival.adapters.base import Adapter, to_model_layout
 from mival.modelcard import ModelCard
+from mival.runtime_platform import STATE_DICT_TRANSFORM, state_dict_transform_spec
 
 
 @dataclass
@@ -49,6 +50,10 @@ class TorchHandle:
     head: Optional[LinearHead] = None
     #: What the fit did, copied into ``train_log.jsonl`` by the models stage.
     fit_record: Optional[Mapping[str, Any]] = None
+    #: True only for the card's weights untouched: set by ``load`` and carried
+    #: by ``with_head``. It is what lets ``Adapter.cached_features`` reuse a
+    #: representation across fits; a fine-tuned handle is built without it.
+    backbone_as_published: bool = False
 
 
 DEFAULT_RETURNS = ("logits", "features")
@@ -142,9 +147,51 @@ def build_module(card: ModelCard, weight: Optional[Mapping[str, Any]] = None) ->
     state = _read_state_dict(uri, weights_format, ext.get("state_dict_key"))
     for old, new in ext.get("rename_keys", {}).items():
         state = {key.replace(old, new, 1) if key.startswith(old) else key: value for key, value in state.items()}
+    transform = (card.runtime or {}).get(STATE_DICT_TRANSFORM)
+    if transform is not None:
+        name, function = _state_dict_transform(card, transform, code_path)
+        state = function(state)
+        if not isinstance(state, Mapping):
+            raise TypeError(f"{card.model_id!r}: runtime.{STATE_DICT_TRANSFORM} {name!r} returned "
+                            f"{type(state).__name__}, not a state dict")
+        state = dict(state)
+    else:
+        name = None
     _check_n_outputs(card, state)
-    module.load_state_dict(state, strict=True)
+    try:
+        module.load_state_dict(state, strict=True)
+    except RuntimeError as error:
+        override = card.runtime_override
+        raise RuntimeError(
+            f"{card.model_id!r}: the checkpoint {uri} does not load strictly into the module "
+            f"{builder['module']} builds"
+            + (f" with the runtime.{override['name']} override applied ({'; '.join(override['changes'])})"
+               if override else "")
+            + (f", after runtime.{STATE_DICT_TRANSFORM} {name!r}" if name else
+               f"; no runtime.{STATE_DICT_TRANSFORM} is declared (a backend whose parameter layout "
+               "differs from the checkpoint's needs one)")
+            + f". {error}"
+        ) from error
     return module
+
+
+def _state_dict_transform(card: ModelCard, value: Any, card_code_path: Optional[str]) -> Tuple[str, Any]:
+    """``(name, function)`` for the card's ``runtime.state_dict_transform``.
+
+    Resolved like the builder module: from the card's ``code_path``, or from
+    the transform's own ``code_path`` when it gives one.
+    """
+    name, own_path = state_dict_transform_spec(value, card.model_id)
+    module_name, _, attribute = name.partition(":")
+    code_path = own_path or card_code_path
+    if code_path and _module_file_in(Path(code_path).resolve(), module_name) is None:
+        raise ValueError(f"{card.model_id!r}: runtime.{STATE_DICT_TRANSFORM} {name!r}: no module "
+                         f"{module_name!r} under {code_path}")
+    function = getattr(_import_builder_module(module_name, code_path, card.model_id), attribute, None)
+    if not callable(function):
+        raise ValueError(f"{card.model_id!r}: runtime.{STATE_DICT_TRANSFORM} {name!r}: module "
+                         f"{module_name!r} has no function {attribute!r}")
+    return name, function
 
 
 def _import_builder_module(module_name: str, code_path: Optional[str], model_id: str) -> Any:
@@ -161,8 +208,15 @@ def _import_builder_module(module_name: str, code_path: Optional[str], model_id:
         # the environment and there is nothing to disambiguate.
         return importlib.import_module(module_name)
 
-    module = importlib.import_module(module_name)
-    if _module_is_under(module, root):
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        # code_path is not on sys.path (a transform's own code_path is only
+        # searched for this import, below); anything else missing is real.
+        if error.name != module_name.partition(".")[0]:
+            raise
+        module = None
+    if module is not None and _module_is_under(module, root):
         return module
 
     # code_path entries accumulate on sys.path across the cards of one run and
@@ -295,7 +349,9 @@ class TorchAdapter(Adapter):
         _validate_returns(card)
         module = _build_with_ensemble(card)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        return TorchHandle(module=module.to(device).eval(), device=device, card=card)
+        return TorchHandle(
+            module=module.to(device).eval(), device=device, card=card, backbone_as_published=True
+        )
 
     def features(self, handle: TorchHandle, batch: np.ndarray, index: int = 0) -> np.ndarray:
         import torch
@@ -313,9 +369,15 @@ class TorchAdapter(Adapter):
         return features.detach().cpu().numpy()
 
     def forward(self, handle: TorchHandle, batch: np.ndarray, covariates: Optional[np.ndarray] = None) -> np.ndarray:
-        if handle.head is not None:
-            return handle.head.predict(self.features(handle, batch))
+        scores = self._fitted_head_scores(handle, lambda index: self.features(handle, batch, index))
+        if scores is not None:
+            return scores
         return self._published_scores(handle, batch, covariates)
+
+    def _fitted_head_scores(self, handle: TorchHandle, features_of: Any) -> Optional[np.ndarray]:
+        if handle.head is None:
+            return None
+        return handle.head.predict(features_of(0))
 
     def _published_scores(
         self, handle: TorchHandle, batch: np.ndarray, covariates: Optional[np.ndarray] = None
@@ -502,6 +564,7 @@ class TorchAdapter(Adapter):
             card=handle.card,
             head=head,
             fit_record=dict(record),
+            backbone_as_published=handle.backbone_as_published,
         )
 
     def _finetune(
@@ -690,12 +753,16 @@ class TorchAdapter(Adapter):
             ),
             "trace": trace,
         }
+        # backbone_as_published stays False: these weights are no longer the
+        # card's, so their representations must never be served from a cache
+        # filled by the published backbone.
         return TorchHandle(
             module=module,
             device=device,
             card=handle.card,
             head=lifted,
             fit_record=record,
+            backbone_as_published=False,
         )
 
     # -- fine-tuning helpers ------------------------------------------------

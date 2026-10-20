@@ -23,7 +23,7 @@
         "sha256": "b078fe51c2346a0fe1ca90c726feadb764aa9777b7dba0e05321265511fbb10c",
         "role": "full",
         "derived_from": {
-          "uri": "/data/mi-val/models/cavalab-mtlr-code15/Code15 ResNet MTLR w Dem.pt",
+          "file": "Code15 ResNet MTLR w Dem.pt",
           "sha256": "0e8d25b3935dce8274505f9d62fa346a3f31056c2c99e9747f4d8f6a44d717c8",
           "by": "mival_wrap_cavalab.convert"
         }
