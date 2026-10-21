@@ -21,6 +21,11 @@ GPUs the models stage may spread its arms over; ``workers``: how many CPU
 processes the evaluation stage spreads its slices over). They are kept out of
 every stage spec and land in ``Study.execution``, so a site with eight GPUs
 and one with none get the same config_hash for the same study.
+
+A removed stage key (``retrieve.local_path_root``) with a value is refused
+when the study loads, in the study or in its site config. Written as null,
+the value the site.yaml template once carried, it is dropped, so the stage's
+config_hash is what it is without the line.
 """
 
 from __future__ import annotations
@@ -36,6 +41,12 @@ _REQUIRED = ("study_id", "site")
 
 #: Site-config keys that set how the study runs, never what it computes.
 EXECUTION_KEYS = ("gpus", "workers")
+#: (stage, key) -> why the key is no longer read.
+REMOVED_KEYS = {
+    ("retrieve", "local_path_root"): (
+        "this setting was removed. The CDM image_occurrence.local_path is read as it is "
+        "stored; delete the line and make that path readable on this server (README 4.2)"),
+}
 
 
 def _load_mapping(path: Path) -> Dict[str, Any]:
@@ -86,6 +97,17 @@ class Study:
         return spec
 
 
+def _drop_removed_keys(stages: Mapping[str, Any], source: Path) -> None:
+    """Refuse a removed key that has a value; drop it when it is null (see the module docstring)."""
+    for (stage, key), why in REMOVED_KEYS.items():
+        spec = stages.get(stage)
+        if not isinstance(spec, dict) or key not in spec:
+            continue
+        if spec[key] is not None:
+            raise ValueError(f"{source}: {stage}.{key}: {why}")
+        del spec[key]
+
+
 def _merge_site_config(body: Dict[str, Any], target: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``body`` with the file named by its ``site_config`` merged in, and the execution keys.
 
@@ -100,6 +122,7 @@ def _merge_site_config(body: Dict[str, Any], target: Path) -> Tuple[Dict[str, An
     if not path.is_file():
         raise ValueError(f"{target}: site_config {path} does not exist")
     site = expand(_load_mapping(path), path)
+    _drop_removed_keys(site, path)
     if "site" in site:
         if "site" in body:
             raise ValueError(f"{target}: site is set both here and in {path}")
@@ -123,7 +146,10 @@ def load_study(path: Union[str, Path]) -> Study:
     target = Path(path)
     if target.is_dir():
         target = target / "study.yaml"
-    body, execution = _merge_site_config(_load_mapping(target), target)
+    body = _load_mapping(target)
+    if isinstance(body.get("stages"), dict):
+        _drop_removed_keys(body["stages"], target)
+    body, execution = _merge_site_config(body, target)
     for key in _REQUIRED:
         if key not in body:
             raise ValueError(f"{target}: {key} is required")

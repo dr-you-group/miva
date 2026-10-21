@@ -1,7 +1,10 @@
 @echo off
-rem One study end to end (see run_study.py next to this file, which does the work).
+rem Studies end to end (see run_study.py next to this file, which does the work).
 rem
-rem   usage: run_study.cmd <study>
+rem   usage: run_study.cmd [study ...]   e.g. run_study.cmd (every study), run_study.cmd lvef
+rem
+rem Run the same command again after a failure or an interruption to resume:
+rem finished stages and model arms are skipped.
 rem
 rem   MIVAL_HOME  bundle root (default: the directory above this repository)
 rem   MIVAL_RUNS  where run artifacts go (default: %MIVAL_HOME%\runs)

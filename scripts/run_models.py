@@ -22,6 +22,9 @@ run_study.py calls this for its models step; it can also be run on its own.
   ``MIVAL_RUNTIME_PLATFORM`` names that platform) is applied when the card is
   loaded, so ``run_env`` and the rest of ``runtime`` are the overridden ones;
   the arm's entry in the printed JSON then carries ``runtime_override``.
+- An arm that finished before (its config_hash has a manifest) is skipped by
+  the stage itself, so a rerun after an interruption only runs the rest.
+  Ctrl-C or a stop signal kills the arms still running.
 - One failing arm does not stop the others. When all are done the result is
   printed as JSON: ``runs`` (arms that finished, with their run_dir),
   ``failed`` and ``skipped``, each in the study's arm order.
@@ -270,6 +273,23 @@ def run_arms(arms: Sequence[Arm], slots: Sequence[Optional[str]], runs_root: Pat
 
     free = list(slots)
     running: List[_Job] = []
+    try:
+        _drain(queue, free, running, result, runs_root, inputs, poll_s)
+    except BaseException:
+        # Ctrl-C or a stop signal: no arm keeps running without this process.
+        for job in running:
+            job.process.kill()
+            job.process.wait()
+            job.handle.close()
+        raise
+    for listing in (result.runs, result.failed, result.skipped):
+        listing.sort(key=lambda item: order[item["arm"]])
+    return result
+
+
+def _drain(queue: List[Tuple[Arm, Path]], free: List[Optional[str]], running: List[_Job], result: Result,
+           runs_root: Path, inputs: Mapping[str, Any], poll_s: float) -> None:
+    """Start queued arms on free slots until every arm has finished."""
     while queue or running:
         while queue and free:
             arm, python = queue.pop(0)
@@ -290,9 +310,6 @@ def run_arms(arms: Sequence[Arm], slots: Sequence[Optional[str]], runs_root: Pat
                 result.runs.append(dict(entry, run_dir=run_dir))
             else:
                 result.failed.append(dict(entry, reason=f"exit code {job.process.returncode}"))
-    for listing in (result.runs, result.failed, result.skipped):
-        listing.sort(key=lambda item: order[item["arm"]])
-    return result
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -70,7 +70,6 @@ _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 
 #: Every path the bundle may contain, as full-match regular expressions.
 ALLOWLIST: Tuple[str, ...] = (
-    r"README\.md",
     rf"table1/{_NAME}\.(csv|xlsx)",
     rf"metrics/{_NAME}_(metrics|comparisons|sample_size)\.csv",
     r"metrics/all_metrics\.xlsx",
@@ -2517,10 +2516,6 @@ def _export_study(bundle: _Bundle, study, runs_root: Path, home: Path) -> Dict[s
                 "site has decided this count may leave."
             )
         bundle.small_stage_totals[sid] = dict(small_stages)
-        bundle.notes.append(
-            f"{sid}: `--allow-small-stage-totals`로 반출한다. 제외 수 합계가 1–{min_cell - 1}건인 "
-            f"단계: {listed}. 단계 앞뒤 인원의 차로 이 수를 알 수 있다."
-        )
 
     # Read here from evaluate's own inputs; never written to the bundle.
     scored = scored_counts(evaluate_dirs, study.stage_spec("evaluate"), sid, roots)
@@ -2560,7 +2555,7 @@ def _export_study(bundle: _Bundle, study, runs_root: Path, home: Path) -> Dict[s
             stages, side = masked.stard
             stard = stard_display(stages, flow[1], side, masked_exclusions, min_cell)
         if stard is None:
-            bundle.notes.append(f"{sid}: evaluate manifest에 STARD 건수가 없어 STARD 그림을 그리지 않았다.")
+            bundle.notes.append(f"{sid}: no STARD figure, the evaluate manifest has no STARD counts")
         _figures(bundle, sid, curves, metrics, stard)
 
     stages: Dict[str, List[Dict[str, Any]]] = {}
@@ -2608,136 +2603,13 @@ def _export_study(bundle: _Bundle, study, runs_root: Path, home: Path) -> Dict[s
             "sample_size": sizes, "arms": runtime_overrides(study, runs.get("models") or [])}
 
 
-_CONTENTS = (
-    ("table1/", "Table 1 (긴 형식 csv, xlsx는 넓은 표와 긴 표)"),
-    ("metrics/", "지표(metrics), arm 쌍 비교(comparisons), 표본 크기(sample_size)"),
-    ("curves/", "고정 격자 곡선: 임계값 격자, calibration, 위험 분포, 회귀 calibration, KM"),
-    ("figures/", "가림이 끝난 표에서 다시 그린 그림"),
-    ("exclusions/", "단계 × 사유 제외 건수, 전체·sex별·age_band별"),
-    ("provenance/", "단계별 manifest(경로는 $MIVAL_HOME/$MIVAL_RUNS 기준), retrieve·profile 요약(건수 없이 "
-                    "라벨 값 분위수만), 반출 기준"),
-    ("reporting/", "TRIPOD+AI 체크리스트 초안, Methods 초안"),
-)
-
-
-def _readme(bundle: _Bundle, site: str, by_study: Mapping[str, Mapping[str, Any]],
-            min_cells: Mapping[str, int]) -> str:
-    from mival.reporting import cut_text
-
-    label = masked_label(bundle.min_cell)
-    lines = [
-        f"# 결과 묶음: {site}",
-        "",
-        "환자·ECG 단위 값이 없는 집계 결과만 들어 있다. 반출 전에 아래 검토 포인트를 확인한다.",
-        "",
-        "## 안에 든 것",
-        "",
-    ]
-    lines += [f"- `{folder}` {text}" for folder, text in _CONTENTS]
-    lines += ["", "파일:", ""] + [f"- `{name}`" for name in bundle.files()] + ["", "## 반출 검토 포인트", ""]
-    lines += [
-        f"1. 표에 적힌 건수가 {bundle.min_cell} 이상이거나 `{label}`, 또는 0인지: Table 1, "
-        "exclusions, metrics·comparisons의 n·n_events와 tp/fp/tn/fn, curves의 tp/fp/tn/fn, "
-        "n_predicted_positive, 위험 구간 events/nonevents, 보정 구간 n, at_risk. 아래 "
-        "'가림으로 막지 않는 것'도 읽는다.",
-        "2. 환자·ECG 식별자, 파일 경로, 개별 날짜가 어느 파일에도 없는지. 묶음을 만들 때 자동으로 "
-        "점검했지만 열어서 한 번 더 본다.",
-        "3. provenance의 경로가 `$MIVAL_HOME`, `$MIVAL_RUNS`로 시작하는지.",
-        "4. figures는 가림이 끝난 표에서 그렸다. 개별 점을 그리는 그림(회귀 산점도)은 넣지 않았다.",
-        "5. Table 1의 장비 제조사 이름이 기관을 드러내도 되는지.",
-    ]
-    for note in bundle.notes:
-        lines.append(f"- {note}")
-    lines += [
-        "",
-        "## 가림 규칙",
-        "",
-        f"- `{label}` = 반출하지 않은 칸이다. 1–{bundle.min_cell - 1}건인 모든 칸과, 그 칸을 "
-        "보호하려고 함께 가린 칸이 모두 같은 표시를 쓴다(어느 칸이 작은지 표시로 알 수 없게). "
-        "0은 그대로 둔다.",
-        "- 더해서 합계가 되는 칸들을 한 제약으로 본다: subgroup 수준들과 전체 행(n, 사건, 비사건 "
-        "각각), n = 사건 + 비사건, dev fold들, 같은 기록을 센 다른 arm·재보정 행, Table 1의 "
-        "수준들과 열의 ECG 수, overall = dev + test, test = 결과군 열들, 제외 사유의 sex·age_band "
-        "수준과 그 사유의 합계, 단계의 사유들과 단계 합계(단계 합계는 앞뒤 인원의 차로 알려져 있으므로 "
-        "가리지 않는다), STARD 상자들(각 상자 = 다음 상자 + 그 단계 제외 수, 마지막 상자 = "
-        "analysed + dev).",
-        "- 파일 사이의 관계도 같은 제약 체계에 넣는다(study 하나에 체계 하나). metrics slice의 "
-        "기록은 Table 1의 같은 split·수준 기록의 일부다. 어느 표에도 나오지 않는 수도 칸으로 넣는다: "
-        "라벨(outcome × label_def)마다 그 split·수준의 라벨 1·0·없음 ECG 수(describe.outcome 열로 "
-        "채점한 라벨은 Table 1이 보여 주는 split 전체와 test 수준별 결과군 열의 건수를 쓴다. 같은 "
-        "outcome 이름이라도 다른 열로 채점한 arm, 예컨대 생존 arm의 사건은 그 건수와 묶지 않는다). arm마다 그 "
-        "split·수준에서 예측한 ECG 수(arm이 그 split·수준의 Table 1 ECG를 모두 예측했으면 읽는 사람이 "
-        "그 사실을 안다고 본다. 같은 기관에서는 모든 arm이 Table 1의 ECG를 다 예측했다고 짐작할 수 있다). "
-        "관계는 Table 1 건수 = 라벨 1 + 0 + 없음, 수준들의 합 = split "
-        "전체, slice n ≤ arm이 예측한 ECG ≤ Table 1 건수, arm이 예측한 ECG ≤ 라벨 없음 + n, "
-        "사건 ≤ 라벨 1, 비사건 ≤ 라벨 0이다. 라벨 1·0·없음 수가 1–"
-        f"{bundle.min_cell - 1}일 수 있다고 읽히면 다른 칸처럼 보호한다. comparisons는 두 arm slice의 일부이고, STARD의 "
-        "analysed·dev는 Table 1 test·dev ECG 수의 일부이자 그 split 모든 전체 slice n 이상이다. "
-        "이 부등식들은 건수가 같으면 같은 기록으로 보고 등식으로 쓴다(한쪽에서 가리면 다른 "
-        "쪽에서도 가린다). sample_size는 metrics의 칸을 그대로 보여 준다.",
-        "- 합계가 보이는 제약에서는 가린 칸이 없거나, 둘 이상이면서 그 합이 "
-        f"{bundle.min_cell} 이상이어야 한다. 합계를 가렸으면 부분이 모두 보여서는 안 된다. 어긋나면 "
-        "가장 작은 양수 칸을 더 가리고 다시 본다(보완 가림).",
-        "- 여러 합계를 함께 풀어도 작은 칸이 드러나지 않는지 선형계획으로 확인한다. 보이는 칸과 합계를 "
-        "알고 가린 칸은 1 이상이라고 볼 때, 작은 칸마다 가능한 범위의 최댓값이 "
-        f"{bundle.min_cell} 이상이고 폭이 {bundle.min_cell - 1} 이상이어야 한다. 아니면 칸을 더 가리고, "
-        "더 가릴 칸이 없으면 반출을 멈춘다.",
-        "- metrics는 slice(arm × split × subgroup 수준 × outcome × update)마다 한 번 정해서 그 "
-        "slice의 모든 지표 행에 똑같이 적용한다. 회귀 cut 지표는 그 cut의 사건 수를 따로 본다.",
-        "- 가린 건수에서 나온 비율, 지표, 곡선 점은 비운다(NaN). 임계값 격자의 한 점은 "
-        "tp/fp/tn/fn 중 하나라도 가려지면 그 점 전체를 비운다.",
-        f"- 사건이나 비사건이 {bundle.min_cell}건 미만인 slice의 지표와 곡선은 값을 비운다.",
-        "- 연속형은 최솟값·최댓값 없이 평균, SD, 중앙값, 사분위, p5–p95만 낸다. 값이 "
-        f"{bundle.min_cell}개 미만인 열은 비우고, 더해지는 열들(overall = dev + test, test = 결과군 "
-        f"열 + 라벨 없는 ECG) 중 한 부분이 1–{bundle.min_cell - 1}개이면 그 변수의 연속형 요약을 "
-        "모든 열에서 비운다(n × 평균의 차로 그 부분의 평균이 나오므로). Table 1의 `unit` 열은 그 행이 "
-        "사람(person)을 세는지 ECG를 세는지 적는다.",
-        "- 단계 하나의 제외 수 합계가 1–"
-        f"{bundle.min_cell - 1}건이면 반출을 멈춘다(`--allow-small-stage-totals`로만 진행, "
-        "export_manifest.json에 기록).",
-        "",
-        "## 가림으로 막지 않는 것",
-        "",
-        "- 임계값 격자(curves의 threshold_grid)는 0.01 간격의 누적 건수다. 이웃한 두 점의 차는 그 "
-        "예측 위험 구간에 든 건수이고, 위험 분포(risk_distribution)의 구간 건수도 이렇게 격자에서 "
-        "계산할 수 있다. 예측 위험 구간은 환자 속성이 아니므로 설계상 허용한다. 위험 분포의 가림은 "
-        "표 사이의 일관성을 위한 것이지, 이 구간 건수를 숨기지는 않는다.",
-        "- Kaplan-Meier 곡선의 계단 높이와 at_risk로 그 시점의 사건 수를 대략 알 수 있다(보통의 KM "
-        "보고와 같다).",
-        "- Table 1 건수와 metrics n이 둘 다 보이면 그 차는 그 split·수준에서 라벨이 없거나 예측이 "
-        "없어 평가하지 않은 ECG 수의 상한이다. 라벨 없는 ECG 수는 위 규칙대로 보호한다(그 상한이 "
-        f"1–{bundle.min_cell - 1}이면 한쪽을 가린다). 라벨은 있는데 그 arm이 예측하지 않은 ECG 수"
-        "(라벨 있는 ECG − arm n)는 환자 속성이 아니라 따로 가리지 않는다.",
-        "- retrieve·profile 요약에는 건수를 하나도 넣지 않는다(라벨 값 분위수만). 건수는 Table 1, "
-        "exclusions, STARD에서 가린 대로만 나간다.",
-        "",
-        "## 사용한 기준",
-        "",
-        f"- min_cell: {bundle.min_cell}",
-    ]
-    if len(set(min_cells.values())) > 1:
-        detail = ", ".join(f"{sid} {value}" for sid, value in sorted(min_cells.items()))
-        lines.append(f"- study마다 `export.min_cell`이 달라({detail}) 가장 큰 값 {bundle.min_cell}을 썼다.")
-    for sid, facts in sorted(by_study.items()):
-        crit = facts["criteria"]
-        grid = crit["net_benefit_grid"]
-        lines.append(
-            f"- {sid}: age_bands {', '.join('%g' % b for b in crit['age_bands'])}, "
-            f"regression_cuts {cut_text(crit['regression_cuts']) or 'none'} "
-            f"({crit['regression_cuts_from']}), "
-            f"net_benefit_grid {grid['start']:g}–{grid['stop']:g} step {grid['step']:g} "
-            f"({grid['n_points']}점), evaluate.min_events {crit['min_events']}"
-            + (f", follow_up_after_last_visit_days {crit['follow_up_after_last_visit_days']} "
-               f"({crit['follow_up_after_last_visit_days_from']})"
-               if "follow_up_after_last_visit_days" in crit else "")
-        )
+def _missing_library_notes() -> List[str]:
+    notes = []
     if not _has_openpyxl():
-        lines += ["", "openpyxl이 없어 xlsx 파일(table1/*.xlsx, metrics/all_metrics.xlsx)을 만들지 않았다."]
+        notes.append("openpyxl is not installed: no xlsx files (table1/*.xlsx, metrics/all_metrics.xlsx)")
     if not _has_matplotlib():
-        lines += ["", "matplotlib이 없어 figures/를 만들지 않았다."]
-    if bundle.figure_notes:
-        lines += ["", "## 그림 메모", ""] + [f"- {note}" for note in bundle.figure_notes]
-    return "\n".join(lines) + "\n"
+        notes.append("matplotlib is not installed: no figures/")
+    return notes
 
 
 def _source_sha256() -> Optional[str]:
@@ -2754,7 +2626,7 @@ def build_bundle(studies: Sequence[str], study_root: Path, runs_root: Path, home
     each study's ``runs.json`` is read from ``runs_root/<study_id>/_run/``.
     A stage that excluded 1 to ``min_cell - 1`` records in total fails the
     export unless ``allow_small_stage_totals``; the stages are then recorded
-    in the export manifest and the README. A file already at ``out`` from an
+    in the export manifest. A file already at ``out`` from an
     earlier export is left as it was when this one fails.
     """
     from mival.pipeline.study import load_study
@@ -2803,19 +2675,19 @@ def build_bundle(studies: Sequence[str], study_root: Path, runs_root: Path, home
             "export_source_sha256": _source_sha256(),
             "allow_small_stage_totals": bundle.allow_small_stage_totals,
             "small_stage_totals": bundle.small_stage_totals,
+            # What the bundle left out and why (no STARD counts, a library
+            # missing, a figure warning), for whoever reads it later.
+            "notes": bundle.notes + _missing_library_notes() + bundle.figure_notes,
         })
 
         from mival.reporting import methods_draft, tripod_checklist
 
         _write_text(bundle.path("reporting/methods_draft.md"),
                     methods_draft([by_study[s.study_id] for s in loaded]))
-        # The checklist and README list the bundle's files, themselves included.
+        # The checklist lists the bundle's files, itself included.
         checklist = bundle.path("reporting/tripod_ai_checklist.md")
-        readme = bundle.path("README.md")
         _write_text(checklist, "")
-        _write_text(readme, "")
         _write_text(checklist, tripod_checklist(bundle.files()))
-        _write_text(readme, _readme(bundle, site, by_study, min_cells))
 
         names = bundle.files()
         stray = [n for n in names if not any(re.fullmatch(p, n) for p in ALLOWLIST)]

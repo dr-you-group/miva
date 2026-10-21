@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# One study end to end (see run_study.py next to this file, which does the work).
+# Studies end to end (see run_study.py next to this file, which does the work).
 #
-#   usage: run_study.sh <study>        e.g. run_study.sh lvef
+#   usage: run_study.sh [study ...]    e.g. run_study.sh (every study), run_study.sh lvef
+#
+# Run the same command again after a failure or an interruption to resume:
+# finished stages and model arms are skipped.
 #
 #   MIVAL_HOME  bundle root holding miva/, envs/, models/, code/, config/
 #               (default: the directory above this repository)

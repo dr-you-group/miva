@@ -2,10 +2,9 @@
 -- cdm 을 기관 schema 로, 4145308 을 기관의 12-lead ECG modality concept 으로 바꿔서 실행한다.
 -- 결과의 숫자는 기관 밖으로 내보내지 않는다.
 
--- 1. ECG 전체와 local_path 예시 (local_path_root: null 이면 이 경로를 그대로 읽는다)
+-- 1. ECG 전체와 local_path 예시 (파이프라인은 local_path를 적힌 그대로 읽는다. example_path가 이 서버에서 열려야 한다)
 select count(*)                                          as n_ecg,
        count(distinct person_id)                         as n_person,
-       sum(case when local_path like '%/files/%' then 1 else 0 end) as n_path_with_files_segment,
        min(local_path)                                   as example_path
 from cdm.image_occurrence
 where modality_concept_id = 4145308;

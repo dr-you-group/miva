@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import platform
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -231,6 +232,13 @@ def execute(stage: Stage, ctx: StageContext, force: bool = False) -> Dict[str, A
                 "run_dir": str(layout.run_dir),
             }
 
+    # Whatever is in the run directory now is not a finished run of this
+    # code: an interrupted or failed run (artifacts, no manifest), or one
+    # being forced or redone for stale code. None of it is trusted; the run
+    # starts from an empty directory so no file of the earlier attempt can
+    # end up beside the new ones.
+    if layout.run_dir.exists():
+        shutil.rmtree(layout.run_dir)
     layout.create_dirs()
     started_at = _now()
     clock = time.monotonic()
@@ -238,7 +246,10 @@ def execute(stage: Stage, ctx: StageContext, force: bool = False) -> Dict[str, A
     result = StageResult()
     try:
         result = stage.run(ctx)
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException: Ctrl-C (KeyboardInterrupt) and SystemExit must also
+        # leave the failed manifest, not manifest.json, or the interrupted
+        # run would be skipped as finished next time.
         errors.append(f"{type(exc).__name__}: {exc}")
         raise
     finally:

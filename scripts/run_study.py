@@ -1,8 +1,14 @@
-"""One study end to end: retrieve -> profile -> preprocess -> describe -> models -> evaluate.
+"""Studies end to end: retrieve -> profile -> preprocess -> describe -> models -> evaluate.
 
-    usage: run_study.sh <study>      (Linux)     e.g. run_study.sh lvef
-           run_study.cmd <study>     (Windows)
-           <mival-torch python> run_study.py <study>
+    usage: run_study.sh [study ...]      (Linux)     e.g. run_study.sh, run_study.sh lvef
+           run_study.cmd [study ...]     (Windows)
+           <mival-torch python> run_study.py [study ...]
+
+With no study named, every study under the study root (each directory with a
+study.yaml) runs, one after another in name order. A study that fails is
+logged and the next one starts; at the end a summary lists each study as done
+or FAILED with its log, and the exit code is 1 if any failed. The export hint
+is printed once, for the studies that finished.
 
 The .sh and .cmd files only find the mival-torch interpreter and call this
 file, so every site runs the same steps whatever its OS.
@@ -14,8 +20,17 @@ file, so every site runs the same steps whatever its OS.
     STUDY_ROOT  study directories (default: studies/site in mi-va, studies in the shared copy)
 
 Every stage is ``python -m mival.pipeline.cli run <stage>``. A finished stage
-is not re-run: its config_hash already has a manifest, so a second invocation
-after a failure resumes from the failed stage.
+or model arm is not re-run: its config_hash already has a manifest. So the
+same command run again after a failure or an interruption (Ctrl-C, a closed
+session, a crash, a reboot) skips what finished and resumes at the stage that
+did not. A stage cut off mid-way has a run directory but no manifest; it is
+cleared and run again from the start, never trusted.
+
+Only one invocation may use a runs root at a time: ``$MIVAL_RUNS/.run_study.lock``
+holds the pid of the one running. A second one refuses to start while that
+process is alive; a lock left by a process that is gone (killed, rebooted) is
+taken over. SIGTERM and SIGHUP stop the run like Ctrl-C does: the running
+stage's process is stopped too and the lock is removed.
 
 Written under ``$MIVAL_RUNS/<study_id>/_run/``:
 
@@ -31,11 +46,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -51,6 +69,7 @@ _SCRIPTS_FROM_REPO = HERE.relative_to(REPO)
 
 STAGES = ("retrieve", "profile", "preprocess", "describe", "models", "evaluate")
 CONTROLLER_ENV = "mival-torch"
+LOCK_NAME = ".run_study.lock"
 
 
 def utc_now() -> str:
@@ -62,6 +81,100 @@ def default_study_root() -> Path:
         return Path(os.environ["STUDY_ROOT"]).resolve()
     site = REPO / "studies" / "site"
     return site if site.is_dir() else REPO / "studies"
+
+
+def discover_studies(root: Path) -> List[str]:
+    """Every directory under ``root`` holding a study.yaml, in name order."""
+    return sorted(path.parent.name for path in Path(root).glob("*/study.yaml"))
+
+
+class LockHeld(RuntimeError):
+    pass
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process with this pid is running on this machine."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) would terminate the process on Windows.
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+class RunLock:
+    """``<runs root>/.run_study.lock``: one invocation per runs root (see the module docstring)."""
+
+    def __init__(self, runs_root: Path):
+        self.path = Path(runs_root) / LOCK_NAME
+        self.held = False
+
+    def holder(self) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def acquire(self, studies: Sequence[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        body = {"pid": os.getpid(), "host": socket.gethostname(), "started": utc_now(),
+                "studies": list(studies)}
+        for _ in range(3):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                holder = self.holder()
+                if holder is not None and self._live(holder):
+                    raise LockHeld(
+                        f"another run_study (pid {holder.get('pid')} on {holder.get('host')}, started "
+                        f"{holder.get('started')}) is using {self.path.parent}. Wait for it, or stop "
+                        f"it. If no such run is going on, delete {self.path}")
+                # Left by a process that is gone, or half written: not a live run.
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "wb") as handle:
+                handle.write((json.dumps(body) + "\n").encode("utf-8"))
+            self.held = True
+            return
+        raise LockHeld(f"could not take {self.path}; another run_study may be starting")
+
+    @staticmethod
+    def _live(holder: Mapping[str, Any]) -> bool:
+        if holder.get("host") != socket.gethostname():
+            return True  # a run on another machine sharing this runs root cannot be checked
+        try:
+            return pid_alive(int(holder.get("pid")))
+        except (TypeError, ValueError):
+            return False
+
+    def release(self) -> None:
+        if self.held and (self.holder() or {}).get("pid") == os.getpid():
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+        self.held = False
 
 
 class RunsRecord:
@@ -102,7 +215,7 @@ class StudyRun:
     def log(self, message: str) -> None:
         line = f"{utc_now()} {message}"
         print(line, flush=True)
-        with open(self.out / "run.log", "a", encoding="utf-8") as handle:
+        with open(self.log_path, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
     def stage(self, name: str, inputs: Mapping[str, Any]) -> Optional[str]:
@@ -202,6 +315,10 @@ class StudyRun:
         self.log(f"done: {run_dir}")
         return True
 
+    @property
+    def log_path(self) -> Path:
+        return self.out / "run.log"
+
     def run(self) -> int:
         self.gpus = run_models.gpu_count(self.controller)
         self.log(f"study {self.name}, MIVAL_HOME {self.home}, runs {self.runs_root}, GPU {self.gpus}")
@@ -211,7 +328,6 @@ class StudyRun:
                 self._warn()
                 return 1
         self._warn()
-        print(f"next: {export_hint()} {self.name}")
         return 0
 
     def _warn(self) -> None:
@@ -261,18 +377,69 @@ def _tolerant_stdio() -> None:
             pass
 
 
+def run_studies(names: Sequence[str], root: Path, home: Path, runs_root: Path, controller: Path) -> int:
+    """Each study in turn; a failure is logged and the next one runs. 1 if any failed.
+
+    On Ctrl-C or a stop signal the summary is printed with the study that was
+    running as ``interrupted`` and the rest as ``not run``, and the interrupt
+    goes on to ``main``.
+    """
+    results: List[Tuple[str, str, str]] = []
+    try:
+        for name in names:
+            print(f"{utc_now()} === {name} ===", flush=True)
+            log = str(runs_root / name / "_run" / "run.log")
+            try:
+                study = StudyRun(name, root / name, home, runs_root, controller)
+                log = str(study.log_path)
+                status = "done" if study.run() == 0 else "FAILED"
+            except KeyboardInterrupt:
+                results.append((name, "interrupted", log))
+                raise
+            except Exception:  # noqa: BLE001 - e.g. a study.yaml that does not load; the next study still runs
+                traceback.print_exc()
+                status = "FAILED"
+            results.append((name, status, log))
+    except KeyboardInterrupt:
+        _summary(names, results, runs_root)
+        raise
+    _summary(names, results, runs_root)
+    done = [name for name, status, _ in results if status == "done"]
+    if done:
+        print(f"next: {export_hint()} {' '.join(done)}")
+    return 0 if len(done) == len(results) else 1
+
+
+def _summary(names: Sequence[str], results: Sequence[Tuple[str, str, str]], runs_root: Path) -> None:
+    width = max(len(name) for name in names)
+    print(f"{utc_now()} summary (runs {runs_root}):")
+    for name, status, log in results:
+        print(f"  {name:<{width}}  {status:<11}  {log}")
+    for name in names[len(results):]:
+        print(f"  {name:<{width}}  not run")
+
+
+def _stop_like_ctrl_c(signum, frame) -> None:
+    # The stage process is stopped by subprocess (and by run_models) on the way out.
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _tolerant_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) != 1 or argv[0].startswith("-"):
-        print("usage: run_study.py <study>      e.g. run_study.py lvef")
+    if any(arg.startswith("-") for arg in argv):
+        print("usage: run_study.py [study ...]      e.g. run_study.py, run_study.py lvef ecg-age")
         return 2
-    name = argv[0]
     home = Path(os.environ.setdefault("MIVAL_HOME", str(REPO.parent)))
     runs_root = Path(os.environ.get("MIVAL_RUNS") or home / "runs").resolve()
-    study_dir = default_study_root() / name
-    if not (study_dir / "study.yaml").is_file():
-        print(f"no {study_dir / 'study.yaml'}")
+    root = default_study_root()
+    names = argv or discover_studies(root)
+    if not names:
+        print(f"no study under {root} (a directory with study.yaml)")
+        return 1
+    missing = [name for name in names if not (root / name / "study.yaml").is_file()]
+    if missing:
+        print("\n".join(f"no {root / name / 'study.yaml'}" for name in missing))
         return 1
     try:
         controller = env_python(home / "envs" / CONTROLLER_ENV)
@@ -282,7 +449,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not (home / "config" / "site.yaml").is_file():
         print(f"no {home / 'config' / 'site.yaml'} (see README 4.2: 기관 설정)")
         return 1
-    return StudyRun(name, study_dir, home, runs_root, controller).run()
+    lock = RunLock(runs_root)
+    try:
+        lock.acquire(names)
+    except LockHeld as exc:
+        print(exc)
+        return 1
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _stop_like_ctrl_c)
+    try:
+        print(f"{utc_now()} studies: {' '.join(names)}", flush=True)
+        return run_studies(names, root, home, runs_root, controller)
+    except KeyboardInterrupt:
+        print(f"{utc_now()} interrupted; run the same command again to resume "
+              "(finished stages and model arms are skipped)")
+        return 130
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

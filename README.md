@@ -191,7 +191,6 @@ retrieve:
   dsn_env: ${MIVAL_HOME}/config/micdm.env
   schema: cdm
   modality_concept_id: 4145308
-  local_path_root: null
 models:
   cohort_sources: [my-site-ecg]
 ```
@@ -204,26 +203,19 @@ models:
 | `retrieve.dsn_env` | DB 접속 파일. 기본 `${MIVAL_HOME}/config/micdm.env`. |
 | `retrieve.schema` | MI-CDM 테이블이 있는 schema. SQL Server는 다른 database의 schema를 `CDM2025.dbo`처럼 쓸 수 있다. |
 | `retrieve.modality_concept_id` | `image_occurrence`에서 12-lead ECG를 가리키는 concept. 기본 4145308. |
-| `retrieve.local_path_root` | 기본 `null`. 아래 설명 참고. |
 | `models.cohort_sources` | 이 코호트의 데이터셋 이름 (예: `severance-ecg`). 모델 사전학습 데이터와 겹치는지 표시하는 데 쓴다. |
 
 `site.yaml`에 있는 항목을 study.yaml에도 적으면 어느 값을 쓸지 모호하므로 실행이 멈춘다.
 
-**DICOM 경로 규칙.**
+**DICOM 경로 규칙.** DICOM 파일은 CDM `image_occurrence.local_path`를 앞뒤 공백만 떼고 **적힌 그대로** 읽는다.
+경로를 바꾸는 설정은 없다. 그래서 local_path가 이 서버에서 열리는 경로여야 한다. 파일이 다른 위치에 있으면
+CDM 값을 고치거나, 그 경로가 열리도록 mount 또는 symlink(Windows는 드라이브 연결이나 `mklink /D`)로 맞춘다.
 
-- `local_path_root: null` (기본): `image_occurrence.local_path`를 **그대로** 읽는다.
-  CDM의 local_path가 이 서버에서 읽을 수 있는 경로이면 이것만 확인하면 된다.
-- `local_path_root: /경로`: CDM을 만든 곳과 파일 위치가 다를 때. local_path에서 `/files/` 뒤 부분을 잘라
-  `local_path_root/files/` 아래에 다시 붙인다 (`/files/`가 없는 경로는 제외).
+local_path가 비어 있는 ECG는 `path_unresolvable`, 그 경로에 파일이 없는 ECG는 `file_missing`으로 제외되고
+제외 사유가 기록된다. `sql/check_cohort.<dbms>.sql`의 1번 쿼리에서 `example_path`가 이 서버에서 열리는지 먼저 확인한다.
 
-```
-local_path      = /원래/위치/files/p1000/p10000032/s1/1.dcm
-local_path_root = /mnt/ecg
-읽는 파일       = /mnt/ecg/files/p1000/p10000032/s1/1.dcm
-```
-
-local_path가 비어 있거나 파일이 없는 ECG는 제외되고 제외 사유가 기록된다.
-`sql/check_cohort.<dbms>.sql`의 1번 쿼리에서 `example_path`가 이 서버에서 열리는지 먼저 확인한다.
+예전 판의 `local_path_root`는 없앴다. site.yaml에 경로 값이 남아 있으면 실행이 시작될 때
+`retrieve.local_path_root: this setting was removed` 오류로 멈춘다. 그 줄을 지운다(`null`이면 없는 것으로 친다).
 
 ### 4.3 study.yaml (바꾸지 않음)
 
@@ -271,23 +263,19 @@ Linux:
 
 ```bash
 cd $MIVAL_HOME/miva
-scripts/run_study.sh lvef
-scripts/run_study.sh ecg-age
-scripts/run_study.sh mortality
-scripts/run_study.sh potassium
-scripts/export_results.sh            # 4개가 끝난 뒤. 회신할 zip을 만든다 (7절)
+scripts/run_study.sh                 # study 4개를 차례로 (ecg-age, lvef, mortality, potassium)
+scripts/export_results.sh            # 끝난 뒤. 회신할 zip을 만든다 (7절)
 ```
 
 Windows (cmd):
 
 ```bat
 cd %MIVAL_HOME%\miva
-scripts\run_study.cmd lvef
-scripts\run_study.cmd ecg-age
-scripts\run_study.cmd mortality
-scripts\run_study.cmd potassium
+scripts\run_study.cmd
 scripts\export_results.cmd
 ```
+
+study를 골라 돌릴 때는 이름을 준다: `scripts/run_study.sh lvef`, `scripts/run_study.sh lvef ecg-age`.
 
 `.sh`와 `.cmd`는 mival-torch 인터프리터를 찾아 `run_study.py`·`export_results.py`를 부를 뿐이라 두 OS가 같은 단계를 돈다.
 
@@ -296,8 +284,14 @@ scripts\export_results.cmd
   `site.yaml`의 `gpus`가 여러 장이면 arm을 GPU 수만큼 동시에 돌린다.
 - **GPU가 없으면** torch 모델은 CPU로 돌고, LVEF의 xECG arm 2개는 건너뛴다(로그에 `skip xecg`).
   나머지 결과는 그대로 나온다.
-- 끝난 단계는 다시 돌지 않는다. 중간에 실패하면 원인을 고친 뒤 같은 명령을 다시 실행하면
-  실패한 단계부터 이어서 돈다.
+- 이름 없이 실행하면 `studies/` 아래 study.yaml이 있는 폴더를 모두 이름 순서로 돈다. 한 study가 실패해도
+  다음 study로 넘어가고, 끝에 study마다 `done`/`FAILED`와 로그 위치(`runs/<study>/_run/run.log`)를 요약해서 보여 준다.
+  하나라도 실패하면 종료 코드가 1이다. export 안내 줄(`next: ...`)은 맨 끝에 한 번 나온다.
+- **끊겨도 같은 명령을 다시 실행하면 이어서 돈다.** Ctrl-C, 세션 끊김, 오류, 재부팅 뒤에도 마찬가지다. 끝난 단계와
+  끝난 모델 arm은 다시 돌지 않고(같은 설정의 `manifest.json`이 있으면 건너뜀), 중간에 끊긴 단계는 그 폴더를 비우고
+  처음부터 다시 돈다. 실패했으면 원인을 고친 뒤 같은 명령을 실행한다.
+- 같은 `MIVAL_RUNS`에는 한 번에 하나만 돈다. 실행 중에는 `runs/.run_study.lock`에 그 프로세스 번호가 있고, 두 번째
+  실행은 시작하지 않고 멈춘다. 프로세스가 이미 없는 lock(강제 종료, 재부팅)은 다음 실행이 넘겨받는다.
 - 결과 위치는 `MIVAL_RUNS` (기본 `$MIVAL_HOME/runs`). 디스크가 넉넉한 곳으로 지정할 수 있다.
 - 오래 걸리므로 Linux는 `tmux`나 `nohup`, Windows는 끊겨도 계속 도는 세션(예: 작업 스케줄러, 또는 RDP 세션 유지) 안에서 실행한다.
 - 기관 안의 지표는 **전처리 recipe별로** 계산된다. 모델마다 입력 규격이 달라 recipe가 다르고,
@@ -418,9 +412,16 @@ TRIPOD+AI 체크리스트와 방법 초안. 허용 목록에 있는 파일만 �
   역산할 수 있으면 다른 칸도 함께 가린다 (선형계획으로 검사한 보완 가림). 가린 칸에서 계산한 비율·곡선 점은 NaN이다.
 - **`--allow-small-stage-totals`.** 어떤 단계에서 제외된 ECG가 합쳐서 1~9건이면, 그 합은 단계 전후 건수에서
   역산되므로 가릴 수 없다. 기본은 이때 export를 거부한다. 기관이 그 건수를 내보내도 된다고 정한 뒤에만 이 옵션을
-  쓰며, 쓴 사실은 zip의 `export_manifest.json`과 README에 적힌다.
-- **zip 안의 README에 반출 전 검토 포인트가 있다.** 보내기 전에 기관 담당자가 이 README를 읽고 따른다. 끝나면 화면에도
-  같은 안내가 한 줄 나온다.
+  쓰며, 쓴 사실은 zip의 `provenance/export_manifest.json`(`allow_small_stage_totals`, `small_stage_totals`)에 남는다.
+  가림 기준 `min_cell`과 study별 기준값도 같은 파일의 `criteria`에, 빠진 파일과 그 이유는 `notes`에 있다.
+
+**보내기 전 기관 담당자가 확인할 것** (zip에는 README가 없다):
+
+1. 표의 건수가 `min_cell` 이상이거나 `masked` 또는 0인지 (Table 1, exclusions, metrics·comparisons의 n·n_events와
+   tp/fp/tn/fn, curves의 건수).
+2. 환자·ECG 식별자, 파일 경로, 개별 날짜가 어느 파일에도 없는지. export가 자동으로 점검했지만 열어서 한 번 더 본다.
+3. `provenance/`의 경로가 `$MIVAL_HOME`, `$MIVAL_RUNS`로 시작하는지.
+4. Table 1의 장비 제조사 이름이 기관을 드러내도 되는지.
 
 ## 8. 전체 파일 목록
 
@@ -437,8 +438,8 @@ sql/
   check_cohort.postgresql.sql     실행 전 코호트 규모 확인 쿼리, PostgreSQL (파이프라인은 쓰지 않음)
   check_cohort.sqlserver.sql      같은 쿼리, SQL Server
 scripts/
-  run_study.sh / run_study.cmd    study 하나를 6단계로 실행, Linux·Windows (6절). 인터프리터만 찾고 run_study.py를 부른다
-  run_study.py                    6단계 실행 본체
+  run_study.sh / run_study.cmd    study 전부(또는 이름을 준 것)를 6단계로 실행, Linux·Windows (6절). 인터프리터만 찾고 run_study.py를 부른다
+  run_study.py                    6단계 실행 본체, study 순서·요약·이어 돌기·lock
   run_models.py                   models 단계: arm을 gpus 슬롯에 나눠 실행
   export_results.sh / .cmd        회신 zip 만들기 (7절). export_results.py를 부른다
   export_results.py               반출 본체
@@ -602,7 +603,9 @@ SHA256SUMS                        자기 자신 말고 모든 파일 (3절)
 | `site_config ... does not exist` | `$MIVAL_HOME/config/site.yaml` 만들기 (4.2절) |
 | `... set both here and in .../site.yaml` | study.yaml에 기관 항목을 적었다. study.yaml은 원래대로 두고 site.yaml에만 적는다 |
 | `check_bundle.py`에서 missing / sha256 mismatch | 번들 압축 해제 위치, `sha256sum -c SHA256SUMS` |
-| retrieve에서 ECG가 0건 | site.yaml의 `dbms`, `schema`, `modality_concept_id`, `local_path_root`와 local_path가 이 서버에서 열리는지 (4.2절) |
+| retrieve에서 ECG가 0건, 또는 거의 모두 `file_missing` | site.yaml의 `dbms`, `schema`, `modality_concept_id`, 그리고 CDM local_path가 이 서버에서 적힌 그대로 열리는지 (4.2절, `sql/check_cohort`의 `example_path`) |
+| `retrieve.local_path_root: this setting was removed` | site.yaml에서 `local_path_root` 줄을 지운다. local_path는 적힌 그대로 읽는다 (4.2절) |
+| `another run_study (pid ...) is using ...` | 같은 runs에서 이미 하나가 돌고 있다. 끝나기를 기다린다. 돌고 있는 것이 없는데 계속 나오면 메시지의 lock 파일을 지운다 |
 | DB 접속 실패 | `micdm.env`의 키 이름과 값 (값 뒤 주석 금지), 방화벽, SQL Server는 TCP/IP 활성화와 포트 1433 |
 | `min_test_positives` 오류로 profile 실패 | test 양성 수가 100건 미만. 코호트 규모 문제이므로 연구실에 알린다 |
 | models [mival-xecg] 실패 | GPU, 드라이버(CUDA 12.8 이상). GPU가 없으면 정상적으로 건너뛴다. Linux에서 커널이 그 GPU에서 돌지 않으면 `MIVAL_RUNTIME_PLATFORM=win32`로 컴파일 없는 구현을 쓴다 (6절) |

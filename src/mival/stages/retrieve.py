@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from mival.pipeline.stage import Stage, StageContext, StageResult
+from mival.pipeline.study import REMOVED_KEYS
 from mival.pipeline.tables import write_table
 
 COHORT_INDEX = "cohort_index.parquet"
@@ -70,6 +71,9 @@ SELECTION_RULES = ("first", "last", "nearest_label", "random")
 #: Kinds whose label is a measurement near the ECG, so label_delta_days exists.
 NEAREST_LABEL_KINDS = ("measurement", "measurement_file")
 
+#: The ledger detail of ``path_unresolvable``.
+UNRESOLVABLE_DETAIL = "empty image_occurrence.local_path"
+
 REASON_CODES = frozenset({"label_missing", "label_implausible", "path_unresolvable", "file_missing", "not_selected"})
 
 Query = Callable[[str, Mapping[str, Any]], Any]
@@ -88,7 +92,6 @@ class RetrieveSpec:
     window_days: int
     window_days_sens2: int
     implausible_below: Optional[float]  # None: no lower bound, nothing is excluded as implausible
-    local_path_root: Optional[str]
     require_local_file: bool
     primary_cutoff: Optional[float] = None  # label_primary = value <= primary_cutoff; None: no class labels
     sens1_cutoff: Optional[float] = None    # label_sens1 = value < sens1_cutoff
@@ -117,7 +120,9 @@ class RetrieveSpec:
         pattern = _SQLSERVER_IDENTIFIER if dbms == "sqlserver" else _IDENTIFIER
         if not pattern.match(schema):
             raise ValueError(f"retrieve.schema {schema!r} is not a plain identifier")
-        root = body.get("local_path_root")
+        if body.get("local_path_root") is not None:
+            # load_study refuses it first; this covers a spec given as a file path.
+            raise ValueError(f"retrieve.local_path_root: {REMOVED_KEYS[('retrieve', 'local_path_root')]}")
         source = body.get("label_source") or {}
         kind = str(source.get("kind", "measurement"))
         if kind not in LABEL_KINDS:
@@ -143,7 +148,6 @@ class RetrieveSpec:
             window_days=int(body.get("window_days", 7)),
             window_days_sens2=int(body.get("window_days_sens2", 30)),
             implausible_below=None if body.get("implausible_below", 5) is None else float(body.get("implausible_below", 5)),
-            local_path_root=None if root in (None, "") else str(root),
             require_local_file=bool(body.get("require_local_file", True)),
             primary_cutoff=None if body.get("primary_cutoff") is None else float(body["primary_cutoff"]),
             sens1_cutoff=None if body.get("sens1_cutoff") is None else float(body["sens1_cutoff"]),
@@ -218,7 +222,7 @@ class RetrieveStage(Stage):
             wide[["image_occurrence_id", "label_value"]].rename(columns={"label_value": "label_value_sens2"}),
             on="image_occurrence_id", how="left",
         )
-        frame["local_path"] = frame["local_path"].map(lambda p: resolve_local_path(p, spec.local_path_root))
+        frame["local_path"] = frame["local_path"].map(resolve_local_path)
 
         attributes_path = write_ecg_attributes(ctx, frame)
         kept = exclude(frame, spec, ctx.ledger)
@@ -242,7 +246,7 @@ class RetrieveStage(Stage):
         sql = PERSON_SQL_FILE.read_text(encoding="utf-8").format(schema=spec.schema)
         params = {"modality_concept_id": spec.modality_concept_id}
         frame = query(sql, params)
-        frame["local_path"] = frame["local_path"].map(lambda p: resolve_local_path(p, spec.local_path_root))
+        frame["local_path"] = frame["local_path"].map(resolve_local_path)
         frame = frame.assign(label_datetime=None, label_delta_days=np.nan, label_primary=np.nan,
                              label_sens1=np.nan, label_sens2=np.nan, label_sens3=np.nan)
         frame = derive_labels(frame, spec)
@@ -375,7 +379,7 @@ def exclude_derived(frame, spec: RetrieveSpec, ledger):
         frame = drop(frame, (frame[columns] < 0).any(axis=1), "label_implausible",
                      lambda r: "interval outside plausible bounds or a missing-value code")
     frame = drop(frame, frame["local_path"].isna(), "path_unresolvable",
-                 lambda r: _unresolvable_detail(spec))
+                 lambda r: UNRESOLVABLE_DETAIL)
     if spec.require_local_file:
         frame = drop(frame, ~frame["local_path"].map(lambda p: Path(p).is_file()), "file_missing",
                      lambda r: r.local_path)
@@ -411,28 +415,16 @@ def one_per_person(frame, seed, ledger, rule="random"):
     return ordered[mask]
 
 
-_PATH_SEPARATORS = re.compile(r"[\\/]+")
+def resolve_local_path(cdm_path: Any) -> Optional[str]:
+    """The DICOM file of one ECG: the CDM ``image_occurrence.local_path`` as it is stored.
 
-
-def resolve_local_path(cdm_path: Any, root: Optional[str], path_type: Callable = Path) -> Optional[str]:
-    """The DICOM file of one ECG: the CDM local_path itself, or re-rooted under ``root``.
-
-    With no root the CDM path is used as it is, for a site whose CDM already
-    holds paths readable on this server. With a root, the part after the first
-    'files' directory is placed under it (ledger A-1), for a CDM built where
-    the files lived elsewhere. The CDM path may separate its parts with '/' or
-    '\\' in any mix, and the result is joined the way ``path_type`` joins
-    paths (this machine's ``Path`` unless a test names another).
+    Only surrounding whitespace is stripped; an empty or missing value is
+    ``None`` (``path_unresolvable``). The path is never rewritten, so the CDM
+    must hold paths this server can open.
     """
     if cdm_path is None or cdm_path != cdm_path or not str(cdm_path).strip():
         return None
-    if root is None:
-        return str(cdm_path).strip()
-    parts = _PATH_SEPARATORS.split(str(cdm_path).strip())
-    if "files" not in parts[:-1]:
-        return None
-    tail = parts[parts.index("files") + 1:]
-    return str(path_type(root).joinpath("files", *tail))
+    return str(cdm_path).strip()
 
 
 def _implausible(frame, spec: RetrieveSpec):
@@ -442,12 +434,6 @@ def _implausible(frame, spec: RetrieveSpec):
 
         return pandas.Series(False, index=frame.index)
     return frame["label_value"] <= spec.implausible_below
-
-
-def _unresolvable_detail(spec: RetrieveSpec) -> str:
-    if spec.local_path_root is None:
-        return "empty CDM local_path"
-    return "no 'files/' segment in the CDM local_path"
 
 
 def exclude(frame, spec: RetrieveSpec, ledger):
@@ -462,7 +448,7 @@ def exclude(frame, spec: RetrieveSpec, ledger):
     frame = drop(frame, _implausible(frame, spec), "label_implausible",
                  lambda r: f"label_value={r.label_value}")
     frame = drop(frame, frame["local_path"].isna(), "path_unresolvable",
-                 lambda r: _unresolvable_detail(spec))
+                 lambda r: UNRESOLVABLE_DETAIL)
     if spec.require_local_file:
         frame = drop(frame, ~frame["local_path"].map(lambda p: Path(p).is_file()), "file_missing",
                      lambda r: r.local_path)

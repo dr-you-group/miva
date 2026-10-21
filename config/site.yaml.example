@@ -19,7 +19,7 @@ retrieve:
   dsn_env: ${MIVAL_HOME}/config/micdm.env   # DB 접속 파일 (micdm.env.example 참고)
   schema: cdm                      # MI-CDM 테이블이 있는 schema. SQL Server는 CDM2025.dbo 형식 가능
   modality_concept_id: 4145308     # image_occurrence에서 12-lead ECG를 가리키는 concept
-  local_path_root: null            # null이면 image_occurrence.local_path를 그대로 읽음 (README 4.2)
+  # DICOM 파일은 image_occurrence.local_path를 적힌 그대로 읽는다. 이 서버에서 그 경로가 열려야 한다 (README 4.2)
 
 models:
   cohort_sources: [my-site-ecg]    # 이 코호트의 데이터셋 이름. 모델 사전학습 데이터와 겹침 표시용

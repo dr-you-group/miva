@@ -11,7 +11,7 @@ study names may come in any order.
                 export although a stage excluded 1 to min_cell - 1 records in
                 total (that total can be recovered from the counts before and
                 after the stage). Only after the site has decided that count
-                may leave; the bundle's export_manifest.json and README say so.
+                may leave; the bundle's provenance/export_manifest.json records it.
 
     MIVAL_HOME  bundle root holding miva/, envs/, models/, code/, config/
                 (default: the directory above this repository)
@@ -77,7 +77,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         traceback.print_exc()
         print("export FAILED: no new zip was written (a zip already at that name is from an earlier run)")
         return 1
-    print("반출 전 README의 검토 포인트를 확인하세요")
     return 0
 
 

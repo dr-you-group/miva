@@ -18,8 +18,8 @@
 | `dsn_env` | DB 접속 정보가 든 env 파일 경로. `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` (PostgreSQL은 `PGHOST` 등도 됨). |
 | `schema` | OMOP CDM이 들어 있는 DB schema 이름. SQL Server는 `database.schema` 형식도 된다 (예: `CDM2025.dbo`). |
 | `modality_concept_id` | `image_occurrence`에서 ECG만 고르는 concept. 12-lead ECG는 4145308 (CXR이 같은 테이블에 섞여 있어 필요). |
-| `local_path_root` | `null`(또는 생략)이면 CDM `image_occurrence.local_path`를 그대로 DICOM 경로로 쓴다. 경로를 주면 local_path의 `/files/` 뒤 부분을 이 루트의 `files/` 아래로 다시 연결한다 (CDM을 만든 곳과 파일 위치가 다를 때). |
-| `require_local_file` | true면 DICOM 파일이 실제로 없는 ECG를 제외한다. |
+| (DICOM 경로) | 설정 항목이 없다. CDM `image_occurrence.local_path`를 앞뒤 공백만 떼고 **적힌 그대로** DICOM 경로로 읽는다. 이 서버에서 그 경로가 열려야 한다(파일이 다른 곳에 있으면 mount나 symlink로 맞춘다). 값이 비었거나 없으면 `path_unresolvable`로 제외된다. 예전 `local_path_root`는 없앴다. 값을 주면 study를 읽을 때 오류가 나고, `null`은 없는 것으로 친다. |
+| `require_local_file` | true면 DICOM 파일이 실제로 없는 ECG를 `file_missing`(detail에 그 경로)으로 제외한다. |
 | `ecg_selection.per_person` | `all`은 조건을 통과한 ECG를 전부 쓰고(1인 다건), `one`은 사람마다 1건만 쓴다. 생략하면 `all`. |
 | `ecg_selection.rule` | `one`일 때 고르는 기준. `first`(가장 이른 ECG), `last`(가장 늦은 ECG), `nearest_label`(라벨 측정과 가장 가까운 ECG), `random`(seed 무작위). 같은 날 ECG는 image_occurrence_id 순서로 정한다(CDM에 시각 없음). |
 | `label_source.kind` | 라벨을 만드는 방식. `measurement`(CDM 검사값), `measurement_file`(외부 파일의 검사값), `age_at_ecg`(ECG 시점 나이), `death_within`(N일 내 사망), `machine_measurement`(장비 측정 PR/QRS/QT). |
@@ -137,7 +137,7 @@ models 단계를 띄우는 실행 스크립트(`run_study.py`, `run_models.py`)�
 
 | 위치 | 항목 | 설명 |
 |---|---|---|
-| 명령줄 | `--allow-small-stage-totals` | 한 단계의 제외 수 합계가 1–`min_cell − 1`건이면(단계 앞뒤 인원의 차로 그 수를 알 수 있다) 반출을 멈춘다. 기관이 그 수를 내보내도 된다고 정한 뒤에만 이 옵션을 준다. `export_manifest.json`과 README에 남는다. study 이름 앞이나 뒤 어디에 써도 된다. 예: `export_results.sh --allow-small-stage-totals lvef`. |
+| 명령줄 | `--allow-small-stage-totals` | 한 단계의 제외 수 합계가 1–`min_cell − 1`건이면(단계 앞뒤 인원의 차로 그 수를 알 수 있다) 반출을 멈춘다. 기관이 그 수를 내보내도 된다고 정한 뒤에만 이 옵션을 준다. `provenance/export_manifest.json`의 `allow_small_stage_totals`, `small_stage_totals`에 남는다(zip에 README는 없다). study 이름 앞이나 뒤 어디에 써도 된다. 예: `export_results.sh --allow-small-stage-totals lvef`. |
 | 환경변수 | `MIVAL_RUNS` | 실행 결과가 있는 곳(기본 `$MIVAL_HOME/runs`). 실행 뒤 결과 폴더를 옮겼으면(다른 디스크, 다른 드라이브 문자) 옮긴 곳을 준다. runs.json과 manifest에 적힌 옛 경로는 지금의 `MIVAL_RUNS`·`MIVAL_HOME` 아래로 다시 읽고, evaluate 입력은 기록된 sha256과 같아야 한다. |
 
 Table 1의 `unit` 열은 그 행이 무엇을 세는지(`person` 또는 `ECG`) 적는다. `ecg_selection.per_person: all`이면 한 사람이 ECG 여러 건으로 들어가므로 나이 등 요약은 ECG 단위다. 사람 수는 `persons` 행에 있다.

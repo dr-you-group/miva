@@ -155,9 +155,6 @@ def check_site(retrieve: dict) -> list:
     found = []
     if not Path(retrieve.get("dsn_env", "")).is_file():
         found.append(f"no DB connection file {retrieve.get('dsn_env')}")
-    root = retrieve.get("local_path_root")
-    if root is not None and not Path(root).is_dir():
-        found.append(f"no DICOM root {root}")
     return found
 
 
