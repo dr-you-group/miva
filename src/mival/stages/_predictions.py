@@ -308,9 +308,11 @@ def refit_threshold(p, y, policy: ThresholdPolicy) -> float:
     """
     from mival.threshold import (
         REFIT_SENS95,
+        REFIT_SPEC95,
         REFIT_YOUDEN,
         SplitScores,
         refit_sens95,
+        refit_spec95,
         refit_youden,
     )
 
@@ -319,6 +321,8 @@ def refit_threshold(p, y, policy: ThresholdPolicy) -> float:
         return float(refit_youden(scores).value)
     if policy.policy == REFIT_SENS95:
         return float(refit_sens95(scores, policy.sensitivity_target).value)
+    if policy.policy == REFIT_SPEC95:
+        return float(refit_spec95(scores).value)
     return policy.legacy_threshold
 
 

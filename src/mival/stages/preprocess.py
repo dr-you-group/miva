@@ -40,7 +40,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -236,6 +236,36 @@ def _contract_summary(card: ModelCard) -> Dict[str, Any]:
     }
 
 
+#: preprocess.source_requirements keys: what the source recording must be.
+SOURCE_REQUIREMENT_KEYS = ("n_leads", "sampling_rate_hz", "duration_s")
+
+
+def source_requirements(body: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+    """``preprocess.source_requirements``: at least ``n_leads`` leads, exactly
+    ``sampling_rate_hz``, at least ``duration_s`` seconds. Empty: no requirement."""
+    if not body:
+        return {}
+    unknown = sorted(set(body) - set(SOURCE_REQUIREMENT_KEYS))
+    if unknown:
+        raise ValueError(f"preprocess.source_requirements: unknown keys {unknown}; "
+                         f"known are {list(SOURCE_REQUIREMENT_KEYS)}")
+    return {key: float(value) for key, value in body.items() if value is not None}
+
+
+def unmet_requirements(source, requirements: Mapping[str, float]) -> List[str]:
+    """What the source recording fails of ``requirements``, as ledger detail."""
+    unmet = []
+    if "n_leads" in requirements and len(source.leads) < requirements["n_leads"]:
+        unmet.append(f"{len(source.leads)} leads < {requirements['n_leads']:g}")
+    if "sampling_rate_hz" in requirements and source.sampling_rate_hz != requirements["sampling_rate_hz"]:
+        unmet.append(f"{source.sampling_rate_hz:g} Hz != {requirements['sampling_rate_hz']:g}")
+    # A rounding tolerance of one sample at the source rate: 4999 samples at 500 Hz is 10 s.
+    tolerance = 1.0 / source.sampling_rate_hz if source.sampling_rate_hz else 0.0
+    if "duration_s" in requirements and source.duration_s + tolerance < requirements["duration_s"]:
+        unmet.append(f"{source.duration_s:g} s < {requirements['duration_s']:g}")
+    return unmet
+
+
 class PreprocessStage(Stage):
     name = "preprocess"
     # The compile failures of spec §4.3 are exactly this stage's exclusions.
@@ -274,6 +304,7 @@ class PreprocessStage(Stage):
         spec = ctx.spec or {}
         registry_dir = Path(spec.get("registry", DEFAULT_REGISTRY))
         allow_upsample = bool(spec.get("allow_upsample", False))
+        requirements = source_requirements(spec.get("source_requirements"))
         pad_policy = str(spec.get("pad_policy", "reject"))
 
         perturbation_spec = dict(spec.get("perturbation", {}) or {})
@@ -347,6 +378,10 @@ class PreprocessStage(Stage):
                     "n_leads": len(source.leads),
                 }
             )
+            unmet = unmet_requirements(source, requirements)
+            if unmet:
+                ctx.ledger.record(image_occurrence_id, person_id, "source_nonconforming", "; ".join(unmet))
+                continue
             signal = Signal(
                 data=data,
                 leads=source.leads,

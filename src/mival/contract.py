@@ -17,6 +17,10 @@ REASON_CODES: FrozenSet[str] = frozenset(
         # The record's file could not be read at all (spec §10): a loader
         # failure is one record's exclusion, never the whole run's abort.
         "read_failed",
+        # The source recording is not what preprocess.source_requirements
+        # asks for (a study protocol's waveform criterion, e.g. 12 leads,
+        # 500 Hz, 10 s), so it is excluded before any card is compiled.
+        "source_nonconforming",
     }
 )
 

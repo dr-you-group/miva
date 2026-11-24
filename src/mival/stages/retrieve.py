@@ -7,11 +7,11 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from mival.pipeline.stage import Stage, StageContext, StageResult
 from mival.pipeline.study import REMOVED_KEYS
-from mival.pipeline.tables import write_table
+from mival.pipeline.tables import join_key, write_table
 
 COHORT_INDEX = "cohort_index.parquet"
 SUMMARY = "retrieve_summary.json"
@@ -27,6 +27,10 @@ LABEL_SQL_FILES = {
 }
 SNAPSHOT_SQL_FILE = Path(__file__).with_name("sql") / "label_snapshot.sql"
 PERSON_SQL_FILE = Path(__file__).with_name("sql") / "retrieve_ecg_person.sql"
+#: ``retrieve.ecg_context``: the visit type of each ECG and its acquisition
+#: parameters. Plain SQL, shared by both DBMS.
+VISIT_SQL_FILE = Path(__file__).with_name("sql") / "ecg_visit_type.sql"
+ACQUISITION_SQL_FILE = Path(__file__).with_name("sql") / "ecg_acquisition.sql"
 
 #: ``label_source.kind``. ``measurement`` is the original nearest-measurement
 #: label; the others are derived from the person, death and visit tables or
@@ -50,6 +54,18 @@ FEMALE_CONCEPT_ID = 8532
 #: the site: it is the only artifact that holds age and sex of excluded ECGs.
 ECG_ATTRIBUTES = "ecg_attributes.parquet"
 ECG_ATTRIBUTE_COLUMNS = ("image_occurrence_id", "person_id", "ecg_year", "age_years", "sex")
+#: ``ecg_context`` columns added to ``ecg_attributes`` when the study asks for
+#: them, and carried by describe into ``attributes`` as subgroup axes.
+VISIT_TYPE_COLUMN = "visit_type"
+#: The visit_type level of an ECG whose image_occurrence names no visit.
+VISIT_UNLINKED = "unlinked"
+ACQUISITION_PREFIX = "acq_"
+#: Levels of an acquisition axis: at or below the fixed split value, above it,
+#: or no value recorded for the ECG.
+ACQUISITION_LEVELS = ("low", "high", "unknown")
+#: age_at_ecg exclusion bounds when label_source gives none: the bound the
+#: engine always had (adults only), and no upper bound.
+DEFAULT_MIN_AGE = 18.0
 #: Plausible machine-measured intervals in ms; outside is a device artefact or
 #: a missing-value code (29999, 65535, ...).
 INTERVAL_BOUNDS = {"label_pr": (60.0, 400.0), "label_qrs": (40.0, 250.0), "label_qt": (200.0, 700.0)}
@@ -102,6 +118,11 @@ class RetrieveSpec:
     per_person: str = "all"
     selection_rule: Optional[str] = None
     dbms: str = "postgresql"
+    #: age_at_ecg: ECGs at an age below ``min_age`` or above ``max_age`` are excluded.
+    min_age: Optional[float] = DEFAULT_MIN_AGE
+    max_age: Optional[float] = None
+    #: retrieve.ecg_context; None reads nothing beyond the label.
+    context: Optional["EcgContext"] = None
 
     @property
     def one_per_person(self) -> bool:
@@ -132,7 +153,14 @@ class RetrieveSpec:
         if kind == "measurement" and body.get("label_concept_id") is None:
             raise ValueError("retrieve.label_concept_id is required")
         per_person, rule = _ecg_selection(body, kind)
+        min_age = source.get("min_age", DEFAULT_MIN_AGE)
+        max_age = source.get("max_age")
+        if kind != "age_at_ecg" and ("min_age" in source or "max_age" in source):
+            raise ValueError("retrieve.label_source.min_age/max_age only apply to kind age_at_ecg")
         return cls(
+            min_age=None if min_age is None else float(min_age),
+            max_age=None if max_age is None else float(max_age),
+            context=EcgContext.from_mapping(body.get("ecg_context")),
             label_kind=kind,
             horizon_days=int(source.get("horizon_days", 365)),
             follow_up_after_last_visit_days=int(
@@ -159,6 +187,61 @@ class RetrieveSpec:
             "window_days": window_days,
             "modality_concept_id": self.modality_concept_id,
         }
+
+
+@dataclass(frozen=True)
+class Acquisition:
+    """One acquisition parameter: an image_feature concept whose value is a measurement.
+
+    ``split_at`` is fixed in the study, not computed from the site's data, so
+    ``low`` means the same thing at every site (``value <= split_at``).
+    """
+
+    name: str
+    concept_id: int
+    split_at: float
+
+    @property
+    def column(self) -> str:
+        return ACQUISITION_PREFIX + self.name
+
+    @property
+    def value_column(self) -> str:
+        return self.column + "_value"
+
+
+@dataclass(frozen=True)
+class EcgContext:
+    """``retrieve.ecg_context``: what to read about each ECG besides its label."""
+
+    visit_type: bool = False
+    acquisition: Tuple[Acquisition, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, body: Optional[Mapping[str, Any]]) -> "EcgContext":
+        if not body:
+            return cls()
+        unknown = sorted(set(body) - {"visit_type", "acquisition"})
+        if unknown:
+            raise ValueError(f"retrieve.ecg_context: unknown keys {unknown}")
+        items = []
+        for item in body.get("acquisition") or ():
+            missing = [k for k in ("name", "concept_id", "split_at") if item.get(k) is None]
+            if missing:
+                raise ValueError(f"retrieve.ecg_context.acquisition item {dict(item)!r} lacks {missing}")
+            name = str(item["name"])
+            if not _IDENTIFIER.match(name) or name.endswith("_value"):
+                raise ValueError(f"retrieve.ecg_context.acquisition name {name!r} is not a plain identifier not ending in _value")
+            items.append(Acquisition(name, int(item["concept_id"]), float(item["split_at"])))
+        names = [a.name for a in items]
+        if len(set(names)) != len(names):
+            raise ValueError(f"retrieve.ecg_context.acquisition names repeat: {names}")
+        return cls(visit_type=bool(body.get("visit_type", False)), acquisition=tuple(items))
+
+    @property
+    def columns(self) -> Tuple[str, ...]:
+        visit = (VISIT_TYPE_COLUMN,) if self.visit_type else ()
+        return visit + tuple(c for a in self.acquisition for c in (a.column, a.value_column))
 
 
 def _ecg_selection(body: Mapping[str, Any], kind: str):
@@ -223,8 +306,9 @@ class RetrieveStage(Stage):
             on="image_occurrence_id", how="left",
         )
         frame["local_path"] = frame["local_path"].map(resolve_local_path)
+        frame, context_sql = attach_context(ctx, frame, spec, query)
 
-        attributes_path = write_ecg_attributes(ctx, frame)
+        attributes_path = write_ecg_attributes(ctx, frame, spec)
         kept = exclude(frame, spec, ctx.ledger)
         if spec.one_per_person:
             kept = one_per_person(kept, ctx.seed, ctx.ledger, spec.selection_rule)
@@ -234,6 +318,7 @@ class RetrieveStage(Stage):
         sql_paths = [write_sql(ctx, sql, spec.params(days), f"window_{days}")
                      for days in (spec.window_days, spec.window_days_sens2)]
         sql_paths.append(write_sql(ctx, snapshot_sql, snapshot_params, "label_snapshot"))
+        sql_paths.extend(context_sql)
         summary_path = write_summary(ctx, spec, frame, kept, snapshot)
         return StageResult(outputs=[index_path, summary_path, attributes_path, *sql_paths],
                            counts={"in": len(frame), "out": len(kept)})
@@ -250,7 +335,8 @@ class RetrieveStage(Stage):
         frame = frame.assign(label_datetime=None, label_delta_days=np.nan, label_primary=np.nan,
                              label_sens1=np.nan, label_sens2=np.nan, label_sens3=np.nan)
         frame = derive_labels(frame, spec)
-        attributes_path = write_ecg_attributes(ctx, frame)
+        frame, context_sql = attach_context(ctx, frame, spec, query)
+        attributes_path = write_ecg_attributes(ctx, frame, spec)
         kept = exclude_derived(frame, spec, ctx.ledger)
         if spec.one_per_person:
             kept = one_per_person(kept, ctx.seed, ctx.ledger, spec.selection_rule)
@@ -274,7 +360,7 @@ class RetrieveStage(Stage):
             payload["events"] = int(kept["label_event"].sum())
         summary_path = ctx.layout.artifact(SUMMARY)
         summary_path.write_bytes(json.dumps(payload, indent=2).encode("utf-8"))
-        return StageResult(outputs=[index_path, summary_path, attributes_path, sql_path],
+        return StageResult(outputs=[index_path, summary_path, attributes_path, sql_path, *context_sql],
                            counts={"in": len(frame), "out": len(kept)})
 
 
@@ -362,7 +448,12 @@ def exclude_derived(frame, spec: RetrieveSpec, ledger):
                      lambda r: f"label_value={r.label_value}")
     elif spec.label_kind == "age_at_ecg":
         frame = drop(frame, frame["label_value"].isna(), "label_missing", lambda r: "no year_of_birth")
-        frame = drop(frame, frame["label_value"] < 18, "label_implausible", lambda r: f"age={r.label_value}")
+        if spec.min_age is not None:
+            frame = drop(frame, frame["label_value"] < spec.min_age, "label_implausible",
+                         lambda r: f"age={r.label_value} below {spec.min_age:g}")
+        if spec.max_age is not None:
+            frame = drop(frame, frame["label_value"] > spec.max_age, "label_implausible",
+                         lambda r: f"age={r.label_value} above {spec.max_age:g}")
     elif spec.label_kind == "death_within":
         frame = drop(frame, frame["label_time_days"].isna(), "label_implausible",
                      lambda r: "no visit to bound follow-up")
@@ -525,8 +616,61 @@ def write_summary(ctx: StageContext, spec: RetrieveSpec, frame, kept, snapshot: 
     return path
 
 
-def write_ecg_attributes(ctx: StageContext, frame) -> Path:
-    """Age at the ECG and sex of every ECG the query returned, excluded or not."""
+def visit_type_levels(visits):
+    """``image_occurrence_id -> visit_type``: the visit concept's name, its id if unnamed, else unlinked."""
+    import pandas
+
+    named = visits["visit_concept_name"].where(visits["visit_concept_name"].notna(),
+                                                visits["visit_concept_id"].map(
+                                                    lambda v: None if pandas.isna(v) else "%d" % int(v)))
+    return pandas.Series(named.fillna(VISIT_UNLINKED).to_numpy(), index=join_key(visits["image_occurrence_id"]))
+
+
+def acquisition_levels(values, item: "Acquisition"):
+    """``(value, level)`` per ECG: the median over the parameter's rows, then low/high at ``split_at``."""
+    import numpy as np
+    import pandas
+
+    if values.empty:
+        value = pandas.Series(dtype=float)
+    else:
+        keyed = values.assign(_key=join_key(values["image_occurrence_id"]))
+        value = keyed.groupby("_key")["value_as_number"].median().astype(float)
+    level = pandas.Series(np.where(value <= item.split_at, "low", "high"), index=value.index)
+    return value, level
+
+
+def attach_context(ctx: StageContext, frame, spec: RetrieveSpec, query: Query):
+    """Add the ``ecg_context`` columns to the queried ECGs; returns the frame and the SQL written."""
+    context = spec.context
+    if context is None or not context.columns:
+        return frame, []
+    keys = join_key(frame["image_occurrence_id"])
+    params = {"modality_concept_id": spec.modality_concept_id}
+    paths = []
+    frame = frame.copy()
+    if context.visit_type:
+        sql = VISIT_SQL_FILE.read_text(encoding="utf-8").format(schema=spec.schema)
+        levels = visit_type_levels(query(sql, params))
+        levels = levels[~levels.index.duplicated()]
+        frame[VISIT_TYPE_COLUMN] = keys.map(levels).fillna(VISIT_UNLINKED).to_numpy()
+        paths.append(write_sql(ctx, sql, params, "ecg_visit_type"))
+    for item in context.acquisition:
+        sql = ACQUISITION_SQL_FILE.read_text(encoding="utf-8").format(schema=spec.schema)
+        item_params = dict(params, feature_concept_id=item.concept_id)
+        value, level = acquisition_levels(query(sql, item_params), item)
+        frame[item.value_column] = keys.map(value).astype(float).to_numpy()
+        frame[item.column] = keys.map(level).fillna("unknown").to_numpy()
+        paths.append(write_sql(ctx, sql, item_params, f"ecg_acquisition_{item.name}"))
+    return frame, paths
+
+
+def write_ecg_attributes(ctx: StageContext, frame, spec: Optional[RetrieveSpec] = None) -> Path:
+    """Age at the ECG and sex of every ECG the query returned, excluded or not.
+
+    The ``ecg_context`` columns the study asked for follow: visit type and
+    each acquisition parameter's value and low/high level.
+    """
     import numpy as np
     import pandas
 
@@ -542,7 +686,11 @@ def write_ecg_attributes(ctx: StageContext, frame) -> Path:
         "age_years": (index.dt.year - birth).astype(float),
         "sex": sex,
     })
-    return write_table(table.to_dict("records"), ctx.layout.artifact(ECG_ATTRIBUTES), ECG_ATTRIBUTE_COLUMNS)
+    extra = spec.context.columns if spec is not None and spec.context is not None else ()
+    for column in extra:
+        table[column] = frame[column].to_numpy()
+    return write_table(table.to_dict("records"), ctx.layout.artifact(ECG_ATTRIBUTES),
+                       ECG_ATTRIBUTE_COLUMNS + tuple(extra))
 
 
 def _decimals_to_float(frame):

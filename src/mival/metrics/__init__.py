@@ -63,6 +63,8 @@ INTERPRETATION_METRICS: Tuple[str, ...] = ()
 #: Metric name (or, for parameterized metrics, name stem) -> category.
 METRIC_CATEGORY: Dict[str, str] = {}
 METRIC_CATEGORY.update({name: DISCRIMINATION for name in _discrimination.METRICS})
+#: threshold@<policy>: the operating point a policy's 2x2 rows were cut at.
+METRIC_CATEGORY["threshold"] = DISCRIMINATION
 METRIC_CATEGORY.update({name: CALIBRATION for name in _calibration.METRICS})
 METRIC_CATEGORY.update({name: CLINICAL_UTILITY for name in _utility.METRIC_STEMS})
 METRIC_CATEGORY.update({name: INTERPRETATION for name in INTERPRETATION_METRICS})

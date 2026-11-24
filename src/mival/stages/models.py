@@ -112,7 +112,7 @@ SELECTION_METRIC_REGRESSION = "neg_mae"
 #: Spec §4.4. Primary is `refit_sens95`: STEMI miss cost is asymmetric, so
 #: Youden — which weighs sensitivity and specificity equally — is clinically
 #: inappropriate. Thresholds are never selected on the test set.
-THRESHOLD_POLICIES = ("legacy", "refit_youden", "refit_sens95")
+THRESHOLD_POLICIES = ("legacy", "refit_youden", "refit_sens95", "refit_spec95")
 PRIMARY_THRESHOLD_POLICY = "refit_sens95"
 
 #: Spec §4.4 training modes.
@@ -881,11 +881,15 @@ class ModelsStage(Stage):
         test_set = _TestSet(
             [record for record in records if record.split == TEST_SPLIT], context
         )
-        if not dev:
+        if not dev and arm.training_mode != "inference_only":
             raise ValueError(
-                f"{context}: no dev records. Thresholds are refit on dev and may never be "
-                "chosen on test (spec §4.4), so a run without dev has no operating point."
+                f"{context}: no dev records. A {arm.training_mode} arm is fitted on dev, "
+                "so a study without a dev split (profile.test_fraction: 1.0) can run "
+                "inference_only arms only."
             )
+        # No dev (profile.test_fraction: 1.0, the whole cohort is validation):
+        # an inference_only arm is scored as shipped. Nothing is refit, so the
+        # only operating point is the card's published one (legacy), if any.
 
         # Gate 3 (spec §3.5), before anything is fitted or inferred. Everyone
         # who influences the model or its operating point counts as fitting
@@ -907,7 +911,11 @@ class ModelsStage(Stage):
                     f"{'/'.join(allowed)}, but the card declares {kind!r}"
                 )
             handle = _adapter_method(adapter, "load", card)(card)
-            dev_probs = _predict(adapter, handle, dev, loader, spec.batch_size, card, _column(arm, card))
+            dev_probs = (
+                _predict(adapter, handle, dev, loader, spec.batch_size, card, _column(arm, card))
+                if dev
+                else np.empty(0, dtype=np.float64)
+            )
             final_handle = handle
             training["weights"] = [dict(weight) for weight in card.weights]
         else:
@@ -926,6 +934,8 @@ class ModelsStage(Stage):
             # A regression or survival arm has no operating point to refit:
             # thresholds are a classification concept.
             thresholds = {}
+        elif not dev:
+            thresholds = fit_thresholds((THRESHOLD_POLICIES[0],), None, card.threshold, card.model_id)
         else:
             scores = _scores_of(dev, dev_probs, arm.label_column)
             thresholds = fit_thresholds(THRESHOLD_POLICIES, scores, card.threshold, card.model_id)
@@ -1004,7 +1014,10 @@ class ModelsStage(Stage):
                 else float(card.output["horizon_days"])
             ),
             "thresholds": {name: fit.to_dict() for name, fit in thresholds.items()},
-            "primary_threshold_policy": None if arm.is_regression or arm.is_survival else PRIMARY_THRESHOLD_POLICY,
+            "primary_threshold_policy": (
+                None if arm.is_regression or arm.is_survival
+                else PRIMARY_THRESHOLD_POLICY if dev else THRESHOLD_POLICIES[0]
+            ),
             "contamination": contamination.to_dict(),
             # Spec §4.4: the fact that test was contacted is itself a recorded
             # result. `counts.test_contacts` carries it into the manifest.

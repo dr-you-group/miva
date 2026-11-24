@@ -259,24 +259,36 @@ def horizon_weights(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """``(case, weight)`` for a binary event-by-``horizon`` question.
 
-    A case (event at ``T <= h``) weighs ``1/G(T-)``; a record still event-free
-    at ``h`` weighs ``1/G(h)``; one censored before ``h`` weighs 0, since its
+    A case (event at ``T <= h``) weighs ``1/G(T-)``; a control, a record known
+    event-free through ``h`` (followed past ``h``, or censored at ``h``
+    itself), weighs ``1/G(h-)``; one censored before ``h`` weighs 0, since its
     status at ``h`` is unknown and the others stand in for it. Every weight is
     1 without censoring.
+
+    Censored at ``h`` counts as a control because the retrieve stage ends
+    follow-up at the horizon: every survivor is censored at exactly ``T = h``.
+    With ``T > h`` as the control rule there would be no control at all, and
+    ``G(h)``, which already counts those censorings, would be near 0.
     """
     time, event = _arrays(time, event)
     case = event & (time <= horizon)
-    control = time > horizon
+    control = horizon_controls(time, event, horizon)
     weight = np.zeros(time.size)
     if time.size == 0:
         return case, weight
     g = g or censoring_survival(time, event)
     if case.any():
         weight[case] = 1.0 / g(time[case], left=True)
-    g_h = float(g(horizon)[0])
+    g_h = float(g(np.array([float(horizon)]), left=True)[0])
     if control.any() and g_h > 0.0:
         weight[control] = 1.0 / g_h
     return case, weight
+
+
+def horizon_controls(time: Sequence, event: Sequence, horizon: float) -> np.ndarray:
+    """Records known event-free through ``horizon``: not a case and followed to ``horizon``."""
+    time, event = _arrays(time, event)
+    return ~(event & (time <= horizon)) & (time >= horizon)
 
 
 def auroc_ipcw(
@@ -285,13 +297,13 @@ def auroc_ipcw(
     """Cumulative/dynamic AUROC at ``h`` (Uno 2007): IPCW cases against survivors.
 
     Cases are events by ``h`` weighted ``1/G(T-)``; controls are everyone
-    still event-free after ``h``, all with the same weight ``1/G(h)``, which
-    therefore cancels. A weighted Mann-Whitney over one sort of the controls;
+    known event-free through ``h`` (:func:`horizon_controls`), all with the
+    same weight ``1/G(h-)``, which therefore cancels. A weighted Mann-Whitney over one sort of the controls;
     risk ties count 1/2.
     """
     time, event, risk = _arrays(time, event, risk)
     case, weight = horizon_weights(time, event, h, g)
-    control = time > h
+    control = horizon_controls(time, event, h)
     if not case.any() or not control.any():
         return float("nan")
     controls = np.sort(risk[control])
@@ -306,7 +318,7 @@ def brier_ipcw(
 ) -> float:
     """IPCW Brier score of a risk by ``h`` (Graf 1999), averaged over every record.
 
-    ``(1 - r)^2`` for a case, ``r^2`` for a survivor past ``h``, each with its
+    ``(1 - r)^2`` for a case, ``r^2`` for a control (event-free through ``h``), each with its
     :func:`horizon_weights` weight; a record censored before ``h`` adds 0 but
     stays in the denominator.
     """

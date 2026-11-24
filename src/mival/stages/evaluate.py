@@ -18,6 +18,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
+
 from mival.criteria import Cut, net_benefit_grid, parse_cuts
 from mival.pipeline.layout import exclusions_root
 from mival.pipeline.ledger import load_runs, read_exclusions
@@ -33,8 +35,10 @@ from mival.stages._comparisons import (  # noqa: F401 - _comparison_rows, _selec
 from mival.stages._curve_rows import (  # noqa: F401 - CURVE_COLUMNS re-exported
     CURVE_COLUMNS,
     CURVES_LONG,
+    ROC_METRIC,
     classification_curve_rows,
     regression_curve_rows,
+    roc_curve_rows,
     survival_curve_rows,
 )
 from mival.stages._predictions import (
@@ -121,6 +125,12 @@ LINEAR_PROBE = "linear_probe"
 
 #: The models stage's policy for the card's own published operating point.
 LEGACY_POLICY = "legacy"
+#: Operating points reported beside the primary one, each as its own 2x2 table
+#: (``sensitivity@<policy>`` ...), on the test split: the card's published
+#: threshold, then the dev-fitted Youden, rule-out (sensitivity 95%) and
+#: rule-in (specificity 95%) thresholds. A policy the models stage did not
+#: fit for an arm (no published value; no dev split) has no rows.
+REPORTED_POLICIES = (LEGACY_POLICY, "refit_youden", "refit_sens95", "refit_spec95")
 
 #: ``reason`` values. A row with no reason is a reportable estimate.
 #: ``insufficient_events``: events or non-events below ``evaluate.min_events``;
@@ -268,14 +278,17 @@ class EvaluateStage(Stage):
                 ctx.inputs[TRAIN_LOG_INPUT], settings, warnings
             )
         thresholds = _fit_thresholds(predictions, settings, warnings, recorded)
-        legacy: Dict[Tuple[str, ...], float] = {}
+        operating: Dict[Tuple[str, ...], Dict[str, float]] = {}
         if TRAIN_LOG_INPUT in ctx.inputs:
-            # The log's own legacy fit: the card's published operating point.
-            # An arm without one simply has no legacy rows, so its absence is
-            # not a warning.
-            legacy, _, _ = recorded_thresholds_and_contamination(
-                ctx.inputs[TRAIN_LOG_INPUT], LEGACY_POLICY, []
-            )
+            # The log's own fit of each reported policy. An arm without one
+            # (no published value, no dev split) simply has no rows for it,
+            # so its absence is not a warning.
+            for policy in REPORTED_POLICIES:
+                fits, _, _ = recorded_thresholds_and_contamination(
+                    ctx.inputs[TRAIN_LOG_INPUT], policy, []
+                )
+                for arm, value in fits.items():
+                    operating.setdefault(arm, {})[policy] = value
 
         workers = resolve_workers(ctx.execution.get("workers"))
         run_keys: List[RunKey] = []
@@ -318,7 +331,7 @@ class EvaluateStage(Stage):
                         yield (key, subgroup, outcome, contaminated), (
                             key, _unit_frame(slice_frame, label_column), label_column, outcome,
                             subgroup, threshold, settings, contaminated,
-                            legacy.get(_arm_of(key)), UPDATE_NONE,
+                            operating.get(_arm_of(key)), UPDATE_NONE,
                         )
                         if (
                             subgroup == SUBGROUP_ALL
@@ -544,6 +557,9 @@ class _Settings:
                 )
             return parse_cuts(value, f"evaluate.regression_cuts{where}")
 
+        #: evaluate.residual_cuts: cuts of ``pred - truth`` (the age gap) whose share is reported.
+        self.residual_cuts: Tuple[Cut, ...] = (
+            parse_cuts(spec["residual_cuts"], "evaluate.residual_cuts") if spec.get("residual_cuts") else ())
         self.regression_cuts_by_label: Optional[Dict[str, Tuple[Cut, ...]]] = None
         self.regression_cuts: Tuple[Cut, ...] = ()
         if "regression_cuts" not in spec:
@@ -678,7 +694,7 @@ def _rows_for_slice(
     threshold: float,
     settings: _Settings,
     contaminated: bool,
-    legacy_threshold: Optional[float] = None,
+    operating: Optional[Mapping[str, float]] = None,
     update: str = UPDATE_NONE,
 ) -> List[Dict[str, Any]]:
     if is_regression(key):
@@ -701,9 +717,9 @@ def _rows_for_slice(
     if n == 0:
         return []
 
-    # The card's published operating point is reported on held-out data only,
-    # as a second 2x2 table beside the refitted one.
-    with_legacy = legacy_threshold is not None and key.split == TEST_SPLIT
+    # The other operating points (REPORTED_POLICIES) are reported on held-out
+    # data only, each as a further 2x2 table beside the primary one.
+    extra = dict(operating) if operating and key.split == TEST_SPLIT else {}
 
     def statistic(indices) -> Dict[str, float]:
         values = compute_metrics(
@@ -714,8 +730,8 @@ def _rows_for_slice(
             murphy_bins=settings.murphy_bins,
             n_knots=settings.calibration_knots,
         )
-        if with_legacy:
-            values.update(_legacy_metrics(y[indices], p[indices], legacy_threshold))
+        for policy, value in extra.items():
+            values.update(_policy_metrics(y[indices], p[indices], value, policy))
         return values
 
     point = statistic(np.arange(n))
@@ -750,6 +766,83 @@ def _rows_for_slice(
 
 
 def _curve_rows_for_slice(
+    key: RunKey,
+    frame,
+    label_column: str,
+    outcome: str,
+    subgroup: str,
+    settings: _Settings,
+    update: str = UPDATE_NONE,
+) -> List[Dict[str, Any]]:
+    """Fixed-grid curves of one slice (``_grid_curve_rows``), plus its ROC curve."""
+    rows = _grid_curve_rows(key, frame, label_column, outcome, subgroup, settings, update)
+    if key.split == TEST_SPLIT and subgroup == SUBGROUP_ALL and update == UPDATE_NONE:
+        rows.extend(_roc_rows(key, frame, label_column, outcome, subgroup, settings))
+    return rows
+
+
+def _roc_rows(key: RunKey, frame, label_column: str, outcome: str, subgroup: str,
+              settings: _Settings) -> List[Dict[str, Any]]:
+    """The ``roc`` curve(s) of one whole test slice (``mival.stages._curve_rows.ROC``).
+
+    The records and the event definition are those of the slice's AUROC
+    metric: a probability arm's label; a regression arm's label at each of its
+    cuts, scored by how far past the cut the prediction falls; a survival
+    arm's event by the first horizon, records censored earlier left out (the
+    ``auroc_horizon_cc`` definition). The same ``min_events`` floor as every
+    other curve applies to events and non-events.
+    """
+    import numpy as np
+
+    from mival.metrics.survival import horizon_metric
+
+    series = []
+    if is_survival(key):
+        usable = frame[
+            frame[label_column].notna()
+            & frame["label_time_days"].notna()
+            & frame["pred_value"].notna()
+        ]
+        horizon = settings.horizons[0]
+        time = usable["label_time_days"].to_numpy(dtype=float)
+        event = usable[label_column].to_numpy(dtype=float) > 0
+        case = event & (time <= horizon)
+        keep = case | (~case & (time >= horizon))
+        series.append((
+            horizon_metric(ROC_METRIC + "_horizon_cc", horizon), usable[keep],
+            case[keep].astype(float), usable["pred_value"].to_numpy(dtype=float)[keep],
+        ))
+    elif is_regression(key):
+        from mival.metrics.regression import cut_metric_name
+
+        usable = frame[frame[label_column].notna() & frame["pred_value"].notna()]
+        y = usable[label_column].to_numpy(dtype=float)
+        p = usable["pred_value"].to_numpy(dtype=float)
+        for cut in settings.cuts_for(key.label_def):
+            name = cut_metric_name(cut).replace("auroc", ROC_METRIC, 1)
+            score = p - cut.value if cut.higher_is_event else cut.value - p
+            series.append((name, usable, cut.events(y).astype(float), score))
+    else:
+        usable = frame[frame[label_column].notna()]
+        series.append((
+            ROC_METRIC, usable, usable[label_column].to_numpy(dtype=float),
+            usable["prob"].to_numpy(dtype=float),
+        ))
+    rows: List[Dict[str, Any]] = []
+    for metric, records, labels, score in series:
+        n_events = int(np.sum(labels == 1.0))
+        if labels.size == 0 or min(n_events, int(labels.size) - n_events) < max(settings.min_events, 1):
+            continue
+        groups = records[BOOTSTRAP_UNIT].to_numpy() if BOOTSTRAP_UNIT in records.columns else None
+        rows.extend(roc_curve_rows(
+            key, subgroup, outcome, metric, labels, score, groups,
+            n_replicates=settings.bootstrap_replicates if settings.bootstrap else 0,
+            seed=settings.seed, alpha=settings.bootstrap_alpha,
+        ))
+    return rows
+
+
+def _grid_curve_rows(
     key: RunKey,
     frame,
     label_column: str,
@@ -868,6 +961,11 @@ def _update_units(
             ]
             y_dev = development[label_column].to_numpy(dtype=float)
             p_dev = development[value_column].to_numpy(dtype=float)
+            if y_dev.size == 0:
+                # No development split (a 100% validation design): nothing to
+                # update with, by design, so no rows and no warning.
+                fitted[(arm, update)] = None
+                continue
             if regression:
                 from mival.metrics.regression import fit_linear_recalibration
 
@@ -910,7 +1008,7 @@ def _slice_unit(
     threshold: float,
     settings: _Settings,
     contaminated: bool,
-    legacy_threshold: Optional[float],
+    operating: Optional[Mapping[str, float]],
     update: str,
 ):
     """``(metrics rows, curve rows)`` of one slice — the unit a worker process runs.
@@ -923,7 +1021,7 @@ def _slice_unit(
     rows = _rows_for_slice(
         key=key, frame=frame, label_column=label_column, outcome=outcome,
         subgroup=subgroup, threshold=threshold, settings=settings,
-        contaminated=contaminated, legacy_threshold=legacy_threshold, update=update,
+        contaminated=contaminated, operating=operating, update=update,
     )
     if update != UPDATE_NONE and is_regression(key):
         return rows, []
@@ -981,8 +1079,12 @@ def _updated_threshold(mapping, threshold: float) -> float:
     return float(mapping(np.array([threshold]))[0])
 
 
-def _legacy_metrics(y, p, threshold: float) -> Dict[str, float]:
-    """The threshold-dependent measures at the legacy operating point."""
+def _policy_metrics(y, p, threshold: float, policy: str = LEGACY_POLICY) -> Dict[str, float]:
+    """The threshold-dependent measures at one policy's operating point, ``<name>@<policy>``.
+
+    ``threshold@<policy>`` is the threshold itself (fitted on dev, or the
+    card's), so a reader can see where each 2x2 table was cut.
+    """
     from mival.metrics import PARAMETER_SEP, confusion_counts
     from mival.metrics.discrimination import contingency_metrics
 
@@ -990,7 +1092,41 @@ def _legacy_metrics(y, p, threshold: float) -> Dict[str, float]:
     derived = contingency_metrics(*counts)
     values = {name: derived[name] for name in ("sensitivity", "specificity", "ppv", "npv")}
     values.update(zip(("tp", "fp", "tn", "fn"), (float(count) for count in counts)))
-    return {f"{name}{PARAMETER_SEP}{LEGACY_POLICY}": value for name, value in values.items()}
+    values["threshold"] = float(threshold)
+    return {f"{name}{PARAMETER_SEP}{policy}": value for name, value in values.items()}
+
+
+#: Suffix of a regression cut's 2x2 table: ``sensitivity@cut_le40`` and so on.
+CUT_TABLE_PREFIX = "cut_"
+
+
+def _cut_metrics(y, p, cut) -> Dict[str, float]:
+    """The 2x2 of a regression arm at one cut: predicted past the cut against observed past it.
+
+    The cut is applied to the prediction as it is applied to the label (the
+    paper's clinical line, e.g. predicted LVEF <= 40), so these are the
+    sensitivity and specificity of the model used as published, with no
+    threshold chosen on data.
+    """
+    from mival.metrics import PARAMETER_SEP
+    from mival.metrics.discrimination import contingency_metrics
+
+    truth = cut.events(y)
+    called = cut.events(p)
+    counts = (
+        int(np.sum(called & truth)), int(np.sum(called & ~truth)),
+        int(np.sum(~called & ~truth)), int(np.sum(~called & truth)),
+    )
+    derived = contingency_metrics(*counts)
+    values = {name: derived[name] for name in ("sensitivity", "specificity", "ppv", "npv")}
+    values.update(zip(("tp", "fp", "tn", "fn"), (float(count) for count in counts)))
+    suffix = CUT_TABLE_PREFIX + cut.name
+    return {f"{name}{PARAMETER_SEP}{suffix}": value for name, value in values.items()}
+
+
+#: The old name, for callers of the legacy-only form.
+def _legacy_metrics(y, p, threshold: float) -> Dict[str, float]:
+    return _policy_metrics(y, p, threshold, LEGACY_POLICY)
 
 
 def _regression_rows(
@@ -1044,7 +1180,7 @@ def _regression_rows(
         )
 
     def core(indices) -> Dict[str, float]:
-        return core_regression_metrics(y[indices], p[indices])
+        return core_regression_metrics(y[indices], p[indices], settings.residual_cuts)
 
     point = core(np.arange(n))
     rows = _metric_rows(
@@ -1058,7 +1194,9 @@ def _regression_rows(
         n_events = int(events.sum())
 
         def statistic(indices, cut=cut, name=name) -> Dict[str, float]:
-            return {name: auroc_cut(y[indices], p[indices], cut)}
+            values = {name: auroc_cut(y[indices], p[indices], cut)}
+            values.update(_cut_metrics(y[indices], p[indices], cut))
+            return values
 
         cut_point = statistic(np.arange(n))
         rows.extend(

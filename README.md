@@ -16,35 +16,52 @@ MI-CDM ─▶ retrieve ─▶ profile ─▶ preprocess ─▶ describe ─▶ m
 
 ## 1. 검증 대상
 
+코드 버전: **mival 1.1.0** (git tag `v1.1.0`). 세 기관(MIMIC, 서울대, 보라매)이 같은 tag를 돌리고, 결과 zip의
+`provenance/export_manifest.json`에 있는 `export_mival_version`과 `export_source_sha256`으로 같은 코드인지 대조한다.
+
+task마다 설계 2가지, 모두 8개 study다.
+
+- **`<task>-full`** (설계 1): 기관 데이터 100%를 validation으로 쓴다. 원 논문 모델(`inference_only`)만, 재보정 없이,
+  데이터로 고른 임계값 없이 평가한다. linear probe는 학습 데이터가 없으므로 빠진다.
+- **`<task>-dev15`** (설계 2): 사람 단위 단순 무작위 분할(층화 없음)로 dev 15% / validation 85%. linear probe와
+  재보정(update)은 dev에서만 맞추고 validation에서 평가한다.
+
 | task | study | 라벨 | 모델 (card `model_id`) | 방식 |
 |---|---|---|---|---|
-| LVEF | `lvef` | ECG 날짜 ±7일 안 가장 가까운 LVEF (measurement 3027172, %). 분류 LVEF ≤ 40, 회귀 LVEF % | `heartwise-lvef-binary`, `heartwise-lvef-regression` | 공개 가중치 그대로 |
-| | | | `ecgfounder`, `xecg` | backbone 고정, dev에서 linear probe 학습 |
-| ECG 나이 | `ecg-age` | ECG 연도 − 출생연도 (person.year_of_birth), 사람당 ECG 1건 | `lima-ecg-age`, `singstad-ecg-age` | 공개 가중치 그대로 |
-| 1년 사망 | `mortality` | ECG 후 365일 안 사망 (death), 추적 종료 = min(ECG + 365일, 마지막 방문 종료 + 365일) | `cavalab-deepsurv-code15`, `cavalab-mtlr-code15` (나이·성별 사용) | 공개 가중치 그대로 |
-| 혈청 칼륨 | `potassium` | 같은 날 혈청 칼륨 (measurement 3023103, mmol/L). 회귀, K < 3.5 / K > 5.5 판별 | `kardionet-k-12lead`, `vonbachmann-k` | 공개 가중치 그대로 |
+| LVEF | `lvef-full`, `lvef-dev15` | ECG 날짜 ±7일 안 가장 가까운 LVEF (measurement 3027172, %). 분류 LVEF ≤ 40, 회귀 LVEF % | `heartwise-lvef-binary`, `heartwise-lvef-regression` | 공개 가중치 그대로 |
+| | | | `ecgfounder`, `xecg` (dev15만) | backbone 고정, dev에서 linear probe 학습 |
+| ECG 나이 | `ecg-age-full`, `ecg-age-dev15` | ECG 연도 − 출생연도 (person.year_of_birth). PROPHECG-Age(Cho et al., Eur Heart J 2025) 프로토콜: 20~90세, 12 lead·500 Hz·10초 파형만, 사람당 첫 ECG 1건. 나이 > 40 판별, AI-ECG age gap ≥ +7 / < −7 비율 | `lima-ecg-age`, `singstad-ecg-age` | 공개 가중치 그대로 |
+| 1년 사망 | `mortality-full`, `mortality-dev15` | ECG 후 365일 안 사망 (death), 추적 종료 = min(ECG + 365일, 마지막 방문 종료 + 365일) | `cavalab-deepsurv-code15`, `cavalab-mtlr-code15` (나이·성별 사용) | 공개 가중치 그대로 |
+| 혈청 칼륨 | `potassium-full`, `potassium-dev15` | 같은 날 혈청 칼륨 (measurement 3023103, mmol/L, 하한 없음). 회귀, K < 3.5 / K > 5.5 판별 | `kardionet-k-12lead`, `vonbachmann-k` | 공개 가중치 그대로 |
 
-모든 study는 사람 단위로 dev 80% / test 20%를 나누고, 지표는 test에서 사람 단위 bootstrap
-2,000회로 95% CI를 낸다.
+지표는 validation(test)에서 사람 단위 bootstrap 2,000회로 95% CI를 낸다.
+
+**층화 subgroup.** 모든 study가 같은 subgroup을 본다: `sex`, `age_band`, `device_manufacturer`, `visit_type`,
+`acq_filter_low_hz`. 뒤의 둘은 study.yaml의 `retrieve.ecg_context`로 MI-CDM에서 읽는다.
+
+- `visit_type`: ECG의 visit_occurrence → visit_concept 이름. visit에 연결되지 않은 ECG는 `unlinked`.
+- `acq_filter_low_hz`: ECG acquisition parameter Filter Low Frequency (image_feature concept 2128002424).
+  MIMIC-IV-ECG 전체 median 0.005 Hz 이하는 `low`, 초과는 `high`, 값이 없으면 `unknown`. 기준값은 study.yaml에
+  고정되어 있어 세 기관이 같은 경계로 나눈다.
 
 ### MIMIC-IV-ECG 참조 결과 (test, 95% CI)
 
 기관 결과와 비교하기 위한 값이다.
 
-아래 값은 이 공유본과 같은 코드·study.yaml로 MIMIC-IV-ECG에서 돌린 참조 실행(2026-10-20) 값이다.
-저칼륨 기준은 K ≤ 3.5에서 **K < 3.5**로 바뀌었다. LVEF study는 LVEF 값으로 제외하지 않는다(`implausible_below: null`).
+아래 값은 이 공유본(mival 1.1.0)과 같은 코드·study.yaml로 MIMIC-IV-ECG에서 돌린 참조 실행(2026-11-24) 값이다.
+원 논문 모델은 `-full`, linear probe는 `-dev15`의 값이다.
 
 | task | 모델 | 결과 |
 |---|---|---|
-| LVEF | HeartWise | AUROC 0.845 (0.835–0.855), MAE 8.39 (8.22–8.57), R² 0.42 |
-| | ECGFounder (linear probe) | AUROC 0.867 (0.858–0.876), MAE 9.06 (8.89–9.23), R² 0.37 |
-| | xECG (linear probe) | AUROC 0.892 (0.884–0.900), MAE 8.42 (8.27–8.58), R² 0.45 |
-| ECG 나이 | Lima | MAE 9.90 (9.82–9.98), R² 0.58 |
-| | Singstad | MAE 10.04 (9.86–10.25), R² −0.09 |
-| 1년 사망 | cavalab DeepSurv | C-index 0.785 (0.774–0.796), AUROC@1년 0.788 |
-| | cavalab MTLR | C-index 0.811 (0.799–0.821), AUROC@1년 0.814 |
-| 혈청 칼륨 | von Bachmann | MAE 0.357, AUROC K<3.5 0.768 (0.756–0.779), K>5.5 0.851 |
-| | Kardio-Net | MAE 0.429, AUROC K<3.5 0.719 (0.708–0.732), K>5.5 0.787 |
+| LVEF | HeartWise | AUROC 0.841 (0.837–0.846), MAE 8.43 (8.35–8.51) |
+| | ECGFounder (linear probe) | AUROC 0.845 (0.840–0.850), MAE 9.31 (9.22–9.39) |
+| | xECG (linear probe) | AUROC 0.875 (0.871–0.880), MAE 8.61 (8.53–8.69) |
+| ECG 나이 | Lima | MAE 9.77 (9.73–9.81), r 0.772, AUROC 나이>40 0.916, gap ≥+7 38.9% / <−7 16.7% |
+| | Singstad | MAE 9.43 (9.36–9.50), r 0.567, AUROC 나이>40 0.918, gap ≥+7 32.3% / <−7 21.0% |
+| 1년 사망 | cavalab DeepSurv | C-index 0.782 (0.777–0.787) |
+| | cavalab MTLR | C-index 0.804 (0.799–0.808) |
+| 혈청 칼륨 | von Bachmann | MAE 0.358, AUROC K<3.5 0.772, K>5.5 0.836 |
+| | Kardio-Net | MAE 0.428, AUROC K<3.5 0.724, K>5.5 0.783 |
 
 ## 2. 필요한 환경
 
@@ -162,7 +179,7 @@ preprocess, evaluate(`workers: 4`), export까지 확인했다. 다음은 아직 
 | `config/micdm.env` | DB 접속 정보 (비밀번호 포함) | `miva/config/micdm.env.example` |
 | `config/site.yaml` | 기관 식별자, DBMS, schema, ECG concept, DICOM 경로, 코호트 이름 | `miva/config/site.yaml.example` |
 
-study 4개는 모두 첫 줄의 `site_config: ${MIVAL_HOME}/config/site.yaml`로 같은 기관 설정을 읽는다.
+study 8개는 모두 첫 줄의 `site_config: ${MIVAL_HOME}/config/site.yaml`로 같은 기관 설정을 읽는다.
 
 ### 4.1 DB 접속 파일 (`micdm.env`)
 
@@ -263,7 +280,7 @@ Linux:
 
 ```bash
 cd $MIVAL_HOME/miva
-scripts/run_study.sh                 # study 4개를 차례로 (ecg-age, lvef, mortality, potassium)
+scripts/run_study.sh                 # study 8개를 이름 순서로 (ecg-age-dev15, ecg-age-full, lvef-dev15, ...)
 scripts/export_results.sh            # 끝난 뒤. 회신할 zip을 만든다 (7절)
 ```
 
@@ -275,7 +292,7 @@ scripts\run_study.cmd
 scripts\export_results.cmd
 ```
 
-study를 골라 돌릴 때는 이름을 준다: `scripts/run_study.sh lvef`, `scripts/run_study.sh lvef ecg-age`.
+study를 골라 돌릴 때는 이름을 준다: `scripts/run_study.sh lvef-full`, `scripts/run_study.sh lvef-full ecg-age-full`.
 
 `.sh`와 `.cmd`는 mival-torch 인터프리터를 찾아 `run_study.py`·`export_results.py`를 부를 뿐이라 두 OS가 같은 단계를 돈다.
 
@@ -337,7 +354,7 @@ xecg 카드의 `x-mival.runtime.prebuilt_torch_extensions: true`에 따라 엔�
 
 ```bash
 export MIVAL_RUNTIME_PLATFORM=win32     # 이 셸에서 run_study.sh를 실행 (xECG만 영향)
-scripts/run_study.sh lvef
+scripts/run_study.sh lvef-dev15
 ```
 
 카드의 `runtime.windows` 설정이 적용되어 가중치를 vanilla 배열로 바꿔 읽는다. 참조 서버에서 두 구현의 feature cosine
@@ -349,17 +366,16 @@ scripts/run_study.sh lvef
 
 ### 소요 시간
 
-참조 서버(NVIDIA L4 1장, vCPU 16개, RAM 60 GB)에서 MIMIC-IV-ECG로 잰 값이다(2026-10-19~20). linear probe feature 캐시를 켜고,
-evaluate는 `workers: 8`로 돌렸다(`workers: 1`이면 evaluate가 5~6.5배 느리다. 예: potassium 41분, lvef 1시간 57분).
-test ECG 수는 lvef 36,025건 등 코호트에 따라 다르다.
+참조 서버(NVIDIA L4 1장, vCPU 16개, RAM 60 GB)에서 MIMIC-IV-ECG로 mival 1.1.0의 8개 study를 한 번에 돌린 값이다
+(2026-11-24, `scripts/run_study.sh` 하나로 10시간 4분). linear probe feature 캐시를 켜고, evaluate는 `workers: 8`로 돌렸다.
+validation이 코호트의 85~100%라 evaluate가 1.0(test 20%)보다 오래 걸린다.
 
-| study | retrieve | profile | preprocess | describe | models | evaluate | 합계 |
-|---|---|---|---|---|---|---|---|
-| lvef | 1분 | 1초 미만 | 23분 | 5초 | 44분 | 18분 | 1시간 26분 |
-| ecg-age | 28초 | 1초 | 18분 | 6초 | 15분 | 6분 | 39분 |
-| mortality | 29초 | 1초 | 15분 | 5초 | 3분 | 10분 | 29분 |
-| potassium | 17분 | 1초 | 12분 | 6초 | 50분 | 7분 | 1시간 27분 |
-| export | | | | | | | study당 4~12초 (4개 한 zip 21초) |
+| study | 합계 | | study | 합계 |
+|---|---|---|---|---|
+| ecg-age-dev15 | 53분 | | ecg-age-full | 52분 |
+| lvef-dev15 | 1시간 46분 | | lvef-full | 43분 |
+| mortality-dev15 | 57분 | | mortality-full | 1시간 0분 |
+| potassium-dev15 | 1시간 57분 | | potassium-full | 1시간 55분 |
 
 기관 서버의 시간은 코호트 크기, DICOM 읽기 속도, GPU 수에 따라 달라진다. CPU만 쓰는 서버는 측정하지 않았고 models 단계가 훨씬 오래 걸린다.
 
@@ -386,7 +402,7 @@ runs/<study>/
 $MIVAL_HOME/envs/mival-torch/bin/python - <<'PY'
 import glob, os, pandas as pd
 runs = os.environ.get("MIVAL_RUNS", os.environ["MIVAL_HOME"] + "/runs")
-t = pd.read_parquet(max(glob.glob(runs + "/lvef/evaluate/*/artifacts/metrics_long.parquet"), key=os.path.getmtime))
+t = pd.read_parquet(max(glob.glob(runs + "/lvef-full/evaluate/*/artifacts/metrics_long.parquet"), key=os.path.getmtime))
 t = t[(t.split == "test") & (t.subgroup == "all")]
 print(t[["model_id", "label_def", "metric", "value", "ci_lo", "ci_hi", "n"]].to_string(index=False))
 PY
@@ -394,12 +410,12 @@ PY
 
 ### 연구실로 회신할 것: zip 하나
 
-4개 study가 끝나면 `export_results.sh`(Windows는 `.cmd`)를 실행한다. `$MIVAL_HOME`에
+8개 study가 끝나면 `export_results.sh`(Windows는 `.cmd`)를 실행한다. `$MIVAL_HOME`에
 `results-<site>-<YYMMDD>.zip` 하나가 만들어지고, **회신하는 파일은 이 zip 하나뿐이다**. `runs/` 폴더를 통째로 보내지 않는다.
 
 ```bash
 scripts/export_results.sh                       # runs.json이 있는 study 전부
-scripts/export_results.sh lvef ecg-age          # study를 골라서
+scripts/export_results.sh lvef-full ecg-age-full  # study를 골라서
 scripts/export_results.sh --allow-small-stage-totals    # 아래 설명
 ```
 
@@ -408,7 +424,8 @@ TRIPOD+AI 체크리스트와 방법 초안. 허용 목록에 있는 파일만 �
 `cohort_index`, `cohort_split`, 변환된 파형, `predictions`, `person_id`·`image_occurrence_id`·`local_path` 같은
 식별 열, 개인 단위 날짜, 절대 경로. 만든 뒤 모든 파일을 다시 읽어 이런 열·값이 있으면 zip을 쓰지 않고 멈춘다.
 
-- **작은 칸 가림.** study의 `min_cell`(10)보다 작은 칸(1~9)은 `masked`로 나간다. 합계와 나머지 칸에서 가려진 값을
+- **작은 칸 가림.** 1.1.0의 study는 모두 `min_cell: 1`이라 건수를 가리지 않고 그대로 낸다. `min_cell`을 키우면
+  그보다 작은 칸은 `masked`로 나간다. 합계와 나머지 칸에서 가려진 값을
   역산할 수 있으면 다른 칸도 함께 가린다 (선형계획으로 검사한 보완 가림). 가린 칸에서 계산한 비율·곡선 점은 NaN이다.
 - **`--allow-small-stage-totals`.** 어떤 단계에서 제외된 ECG가 합쳐서 1~9건이면, 그 합은 단계 전후 건수에서
   역산되므로 가릴 수 없다. 기본은 이때 export를 거부한다. 기관이 그 건수를 내보내도 된다고 정한 뒤에만 이 옵션을
@@ -448,10 +465,10 @@ docs/
   study-yaml-reference.md         study.yaml 항목별 설명
 
 studies/                          ── study.yaml: 무엇을 어떻게 평가할지
-  lvef/study.yaml                 LVEF 분류(≤40)·회귀, 모델 4개 6 arm
-  ecg-age/study.yaml              ECG 나이 회귀, 모델 2개
-  mortality/study.yaml            1년 사망 생존분석, 모델 2개
-  potassium/study.yaml            혈청 칼륨 회귀·판별 (K<3.5, K>5.5), 모델 2개
+  lvef-full/, lvef-dev15/         LVEF 분류(≤40)·회귀. full은 HeartWise 2 arm, dev15는 모델 4개 6 arm
+  ecg-age-full/, ecg-age-dev15/   ECG 나이 회귀 (PROPHECG-Age 프로토콜), 모델 2개
+  mortality-full/, mortality-dev15/   1년 사망 생존분석, 모델 2개
+  potassium-full/, potassium-dev15/   혈청 칼륨 회귀·판별 (K<3.5, K>5.5), 모델 2개
 
 registry/                         ── model.json: 모델 카드
   models/                         LVEF study의 카드

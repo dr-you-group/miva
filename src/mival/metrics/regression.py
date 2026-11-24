@@ -13,11 +13,15 @@ from .discrimination import auroc
 #: Error and agreement, then calibration of the predicted value (STRATOS):
 #: calibration-in-the-large and the ``y ~ a + b * p`` line.
 CORE_METRICS = ("mae", "rmse", "r2", "bias", "loa_lo", "loa_hi")
+#: The error summaries an age-prediction paper reports (PROPHECG-Age, Cho et
+#: al., Eur Heart J 2025): MAE, MAPE and MSE each with the SD of its per-record
+#: error, and Pearson's r between prediction and truth.
+ERROR_SPREAD_METRICS = ("mae_sd", "mse", "mse_sd", "mape", "mape_sd", "pearson_r")
 CALIBRATION_METRICS = ("reg_citl", "reg_calibration_intercept", "reg_calibration_slope")
-METRICS = CORE_METRICS + CALIBRATION_METRICS
+METRICS = CORE_METRICS + ERROR_SPREAD_METRICS + CALIBRATION_METRICS
 #: ``auroc_cut@<cut.name>`` for a cut with a direction; ``auroc_below@<v>`` for
 #: a bare-number cut, the name results were published under before cuts had one.
-METRIC_STEMS = ("auroc_below", "auroc_cut")
+METRIC_STEMS = ("auroc_below", "auroc_cut", "residual_frac")
 
 
 def _arrays(y_true: Sequence, y_pred: Sequence):
@@ -52,6 +56,43 @@ def limits_of_agreement(y_true: Sequence, y_pred: Sequence) -> Tuple[float, floa
     diff = p - y
     spread = 1.96 * float(np.std(diff, ddof=1)) if diff.size > 1 else float("nan")
     return float(np.mean(diff)) - spread, float(np.mean(diff)) + spread
+
+
+def _sd(values: np.ndarray) -> float:
+    return float(np.std(values, ddof=1)) if values.size > 1 else float("nan")
+
+
+def error_spread(y_true: Sequence, y_pred: Sequence) -> Dict[str, float]:
+    """MAE, MSE and MAPE with the SD of each per-record error, and Pearson's r.
+
+    MAPE is over records whose truth is not zero (a percentage of zero has no
+    value) and is in percent. r is NaN when either side is constant.
+    """
+    y, p = _arrays(y_true, y_pred)
+    absolute = np.abs(p - y)
+    squared = (p - y) ** 2
+    nonzero = y != 0
+    percent = 100.0 * absolute[nonzero] / np.abs(y[nonzero])
+    spread = np.std(y) * np.std(p)
+    r = float(np.mean((y - y.mean()) * (p - p.mean())) / spread) if spread > 0 else float("nan")
+    return {
+        "mae_sd": _sd(absolute),
+        "mse": float(np.mean(squared)),
+        "mse_sd": _sd(squared),
+        "mape": float(np.mean(percent)) if percent.size else float("nan"),
+        "mape_sd": _sd(percent),
+        "pearson_r": r,
+    }
+
+
+def residual_frac(y_true: Sequence, y_pred: Sequence, cut: Cut) -> float:
+    """Share of records whose residual ``pred - truth`` satisfies the cut (the "ECG-aged" share at >= 7)."""
+    y, p = _arrays(y_true, y_pred)
+    return float(np.mean(cut.events(p - y))) if y.size else float("nan")
+
+
+def residual_metric_name(cut: Cut) -> str:
+    return "residual_frac@%s" % cut.name
 
 
 def auroc_cut(y_true: Sequence, y_pred: Sequence, cut: Cut) -> float:
@@ -117,12 +158,19 @@ def fit_linear_recalibration(
     return lambda values: a + b * np.asarray(values, dtype=float)
 
 
-def core_regression_metrics(y_true: Sequence, y_pred: Sequence) -> Dict[str, float]:
-    """Every regression metric that is not about a cut."""
+def core_regression_metrics(y_true: Sequence, y_pred: Sequence,
+                            residual_cuts: Sequence[Cut] = ()) -> Dict[str, float]:
+    """Every regression metric that is not about an event cut of the truth.
+
+    ``residual_cuts`` adds the share of records past each cut of the residual.
+    """
     low, high = limits_of_agreement(y_true, y_pred)
     values = {"mae": mae(y_true, y_pred), "rmse": rmse(y_true, y_pred), "r2": r2(y_true, y_pred),
               "bias": bias(y_true, y_pred), "loa_lo": low, "loa_hi": high}
+    values.update(error_spread(y_true, y_pred))
     values.update(reg_calibration(y_true, y_pred))
+    for cut in residual_cuts:
+        values[residual_metric_name(cut)] = residual_frac(y_true, y_pred, cut)
     return values
 
 

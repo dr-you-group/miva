@@ -98,7 +98,7 @@ class DescribeStage(Stage):
 
         attributes_path = ctx.layout.artifact(ATTRIBUTES)
         attributes_path.parent.mkdir(parents=True, exist_ok=True)
-        attributes[list(ATTRIBUTE_COLUMNS)].to_parquet(attributes_path, index=False)
+        attributes[list(ATTRIBUTE_COLUMNS) + context_columns(attributes)].to_parquet(attributes_path, index=False)
 
         table = table1(cohort, attributes, split, spec.outcome)
         table1_path = ctx.layout.artifact(TABLE1_LONG)
@@ -132,6 +132,27 @@ def _with_age_and_sex(frame, bounds):
     return frame
 
 
+def context_columns(frame) -> List[str]:
+    """The retrieve ``ecg_context`` columns a frame carries: visit type, then acquisition."""
+    from mival.stages.retrieve import ACQUISITION_PREFIX, VISIT_TYPE_COLUMN
+
+    visit = [VISIT_TYPE_COLUMN] if VISIT_TYPE_COLUMN in frame.columns else []
+    return visit + [c for c in frame.columns if c.startswith(ACQUISITION_PREFIX)]
+
+
+def _context_levels(frame, columns):
+    """Missing context levels become their axis's "no value" level; acquisition levels are Categorical."""
+    import pandas as pd
+    from mival.stages.retrieve import ACQUISITION_LEVELS, VISIT_TYPE_COLUMN, VISIT_UNLINKED
+
+    for column in columns:
+        if column == VISIT_TYPE_COLUMN:
+            frame[column] = frame[column].fillna(VISIT_UNLINKED)
+        elif not column.endswith("_value"):
+            frame[column] = pd.Categorical(frame[column].fillna(UNKNOWN), categories=list(ACQUISITION_LEVELS))
+    return frame
+
+
 def build_attributes(cohort, ecg_attributes, source_index, bounds):
     """One row per cohort ECG, in cohort order.
 
@@ -141,7 +162,8 @@ def build_attributes(cohort, ecg_attributes, source_index, bounds):
     """
     left = cohort[["image_occurrence_id", "person_id"]].copy()
     left["_key"] = _key(left["image_occurrence_id"])
-    ecg = ecg_attributes[["image_occurrence_id", "ecg_year", "age_years", "sex"]].copy()
+    context = context_columns(ecg_attributes)
+    ecg = ecg_attributes[["image_occurrence_id", "ecg_year", "age_years", "sex"] + context].copy()
     ecg["_key"] = _key(ecg.pop("image_occurrence_id"))
     source = source_index[[
         "image_occurrence_id", "device_manufacturer", "device_model",
@@ -156,6 +178,7 @@ def build_attributes(cohort, ecg_attributes, source_index, bounds):
     frame["sex"] = frame["sex"].fillna(UNKNOWN)
     for column in ("device_manufacturer", "device_model"):
         frame[column] = frame[column].fillna(UNKNOWN)
+    frame = _context_levels(frame, context)
     return _with_age_and_sex(frame, bounds)
 
 
@@ -240,6 +263,13 @@ def _column_rows(frame, column: str, outcome: Optional[str] = None) -> List[Dict
     categorical("device_manufacturer", frame["device_manufacturer"])
     categorical("sampling_rate_hz", frame["sampling_rate_hz"], percent=False)
     continuous("duration_s", frame["duration_s"].to_numpy())
+    for variable in context_columns(frame):
+        if variable.endswith("_value"):
+            continuous(variable, frame[variable].to_numpy())
+        else:
+            values = frame[variable]
+            categories = list(values.cat.categories) if hasattr(values, "cat") else None
+            categorical(variable, values.astype(object), categories)
     return rows
 
 

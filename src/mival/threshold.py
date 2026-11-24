@@ -1,7 +1,8 @@
 """Operating-threshold policies (spec §4.4).
 
-Three policies are reported for every run — ``legacy``, ``refit_youden``,
-``refit_sens95`` — and the primary one is ``refit_sens95``. STEMI is an
+Four policies are reported for every run — ``legacy``, ``refit_youden``,
+``refit_sens95`` (rule-out) and ``refit_spec95`` (rule-in) — and the primary
+one is ``refit_sens95``. STEMI is an
 asymmetric-cost target: a missed occlusion is not exchangeable with a false
 alarm, so Youden's J, which weighs sensitivity and specificity equally, is
 clinically inappropriate as the headline operating point. It is still reported
@@ -34,10 +35,13 @@ DEV_SPLIT = "dev"
 #: study-design constant, not a model property, so it lives here and not on a
 #: ModelCard.
 SENS95_TARGET_SENSITIVITY = 0.95
+#: ``refit_spec95``, the rule-in point: the specificity floor.
+SPEC95_TARGET_SPECIFICITY = 0.95
 
 LEGACY = "legacy"
 REFIT_YOUDEN = "refit_youden"
 REFIT_SENS95 = "refit_sens95"
+REFIT_SPEC95 = "refit_spec95"
 
 
 class ThresholdPolicyError(ValueError):
@@ -52,7 +56,7 @@ def policy_names() -> Tuple[str, ...]:
     the constant from the stage would make ``threshold`` depend on a stage,
     which is exactly the coupling spec §3.1 forbids.
     """
-    return (LEGACY, REFIT_YOUDEN, REFIT_SENS95)
+    return (LEGACY, REFIT_YOUDEN, REFIT_SENS95, REFIT_SPEC95)
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +344,45 @@ def refit_sens95(
     )
 
 
+def refit_spec95(
+    scores: SplitScores, target_specificity: float = SPEC95_TARGET_SPECIFICITY
+) -> ThresholdFit:
+    """Rule-in: highest-sensitivity threshold on dev that keeps the specificity floor.
+
+    The mirror of :func:`refit_sens95`. Specificity does not increase as the
+    threshold falls, so the feasible thresholds form a prefix of the curve and
+    the last of them is the lowest, hence the most sensitive; that maximiser
+    is unique for the same reason. When even the highest observed probability
+    breaks the floor (many negatives tied at the top), the threshold is set
+    just above it: nobody is called positive, specificity 1, sensitivity 0.
+    """
+    _require_dev(scores, REFIT_SPEC95)
+    curve = roc_curve(scores.probs, scores.labels)
+    feasible = np.nonzero(curve.specificity >= target_specificity)[0]
+    if feasible.size == 0:
+        return ThresholdFit(
+            policy=REFIT_SPEC95,
+            value=float(np.nextafter(curve.thresholds[0], np.inf)),
+            fitted_on=scores.split,
+            sensitivity=0.0,
+            specificity=1.0,
+            youden_j=0.0,
+            n=scores.n,
+            n_events=scores.n_events,
+        )
+    index = int(feasible[-1])
+    return ThresholdFit(
+        policy=REFIT_SPEC95,
+        value=float(curve.thresholds[index]),
+        fitted_on=scores.split,
+        sensitivity=float(curve.sensitivity[index]),
+        specificity=float(curve.specificity[index]),
+        youden_j=float(curve.youden_j[index]),
+        n=scores.n,
+        n_events=scores.n_events,
+    )
+
+
 def fit_thresholds(
     policies: Iterable[str],
     scores: SplitScores,
@@ -363,6 +406,8 @@ def fit_thresholds(
             fits[policy] = refit_youden(scores)
         elif policy == REFIT_SENS95:
             fits[policy] = refit_sens95(scores)
+        elif policy == REFIT_SPEC95:
+            fits[policy] = refit_spec95(scores)
         else:
             raise ThresholdPolicyError(
                 f"unknown threshold policy {policy!r}; implemented policies are "

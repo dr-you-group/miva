@@ -1,0 +1,68 @@
+study_id: ecg-age-full
+site_config: ${MIVAL_HOME}/config/site.yaml  # 기관 설정 (site, DB, schema, DICOM 경로). README 4.2
+seed: 20261007
+
+stages:
+  retrieve:
+    # 층화 분석용 ECG 정보 (MI-CDM에서 읽음). 기준값은 MIMIC에서 한 번 구해 고정한 값이며
+    # 기관 데이터로 다시 계산하지 않는다. 그래야 모든 기관에서 low/high의 뜻이 같다.
+    ecg_context:
+      visit_type: true  # image_occurrence.visit_occurrence_id -> visit_occurrence.visit_concept_id 이름. 연결 없음 = unlinked
+      acquisition:
+        # Filter Low Frequency (Hz), image_feature -> measurement. MIMIC-IV-ECG 전체 796,617건의 median 0.005
+        # (0.0005: 110,365 / 0.005: 634,946 / 0.05: 51,306). low = 0.005 이하, high = 0.005 초과, 값 없음 = unknown
+        - {name: filter_low_hz, concept_id: 2128002424, split_at: 0.005}
+    require_local_file: true
+    # PROPHECG-Age (Cho et al., Eur Heart J 2025;46:839, doi:10.1093/eurheartj/ehae790) 프로토콜:
+    # 사람당 처음 찍은 ECG, 나이 20세 미만·90세 초과·나이 정보 없음 제외.
+    # 나이 = ECG 연도 - 출생 연도. 논문은 계산법을 적지 않았고, OMOP person에 출생 연도만 있는 기관이 있어 모든 기관 공통으로 이 정의를 씀
+    ecg_selection: {per_person: one, rule: first}
+    label_source: {kind: age_at_ecg, min_age: 20, max_age: 90}
+
+  profile:
+    # 설계 (1): 기관 데이터 100%를 validation으로 쓴다. dev split 없음.
+    # 재보정(recalibration)도, 데이터로 고르는 threshold(Youden, rule-in, rule-out)도 없다.
+    # 모델은 원 논문 그대로(inference_only) 평가한다.
+    test_fraction: 1.0
+    n_folds: 5             # dev가 없으므로 쓰이지 않음
+    stratify_on: none
+    min_test_positives: 0  # event 수로 실행을 멈추지 않음
+
+  preprocess:
+    # PROPHECG-Age 제외 기준: 파형이 12 lead / 500 Hz / 10 s가 아닌 ECG 제외 (reason source_nonconforming)
+    source_requirements: {n_leads: 12, sampling_rate_hz: 500, duration_s: 10}
+    loader: dicom
+    allow_upsample: false
+    perturbation:
+      axes:
+        resample: [500]
+        duration: [10.24]  # baseline-only; Lima's contract is 10 s padded to 4096 at 400 Hz (Singstad's 10 s is below it)
+    registry: registry/age
+    pad_policy: zero  # Lima centres 10 s in 4096 samples at 400 Hz (pad_anchor: center)
+
+  describe:
+    age_bands: [50, 65, 80]
+    conditions: []  # v1은 동반질환을 읽지 않는다 (논문 한계)
+
+  models:
+    registry: registry/age
+    batch_size: 64
+    arms:
+      - {model_id: lima-ecg-age, training_mode: inference_only, label_def: value}
+      - {model_id: singstad-ecg-age, training_mode: inference_only, label_def: value}
+
+  evaluate:
+    outcomes: {age: null}
+    # PROPHECG-Age 지표: MAE·MAPE·MSE (각 SD), RMSE, Pearson r, 산점도, 40세 초과 판별 AUROC (Table S2)
+    regression_cuts: {value: [{value: 40, op: ">"}]}
+    # AI-ECG age gap (예측 - 실제) >= +7: ECG-aged 군 비율, < -7: ECG-de-aged 군 비율 (Figure 1, Table S14)
+    residual_cuts: [{value: 7, op: ">="}, {value: -7, op: "<"}]
+    bootstrap_replicates: 2000
+    figures: true
+    subgroups: [sex, age_band, device_manufacturer, visit_type, acq_filter_low_hz]
+    net_benefit_grid: {start: 0.01, stop: 0.99, step: 0.01}
+    min_events: 10
+
+  export:
+    min_cell: 1  # 소수 집계를 가리지 않음 (count를 masked로 바꾸지 않고 그대로 낸다)
+    prespecified_subgroups: [sex, age_band]  # 사전 지정 하위군(spec 1.3). 나머지 subgroups(device_manufacturer, visit_type, acq_filter_low_hz)는 탐색적

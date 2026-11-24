@@ -42,7 +42,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from mival import criteria
 from mival.suppression import Cells, DisclosureError  # noqa: F401 - DisclosureError re-exported
@@ -367,8 +367,20 @@ class _Counted:
 
 
 def _family(metric: str) -> str:
-    stem = metric.split("@", 1)[0]
-    return metric if stem in _CUT_STEMS else "core"
+    """The rows that share one n / events count: the core rows, or one regression cut's.
+
+    A cut's AUROC (``auroc_cut@le40``; the bare-number ``auroc_below@40`` is
+    the ``<=`` cut ``le40``) and its 2x2 (``sensitivity@cut_le40`` ...) count
+    the same events, so they are one family.
+    """
+    stem, _, suffix = metric.partition("@")
+    if stem == "auroc_below":
+        return f"cut:le{suffix}"
+    if stem in _CUT_STEMS:
+        return f"cut:{suffix}"
+    if suffix.startswith("cut_"):
+        return f"cut:{suffix[4:]}"
+    return "core"
 
 
 def _add_counted(cells: Cells, table: _Counted, prefix: str, slice_cols, base_extra=()):
@@ -573,19 +585,24 @@ def _add_up(cells: Cells, total, parts) -> None:
 def _whole_slices(metrics: _Counted, family_of, slice_cols) -> Dict[Tuple, Dict[str, Any]]:
     """Core-family cells of every slice as shipped (no update), the folds of a split together.
 
-    Returns ``{slice key without fold: {"row": a row, "n"/"e"/"ne": set of cells}}``.
+    Returns ``{slice key without fold: {"row": a row, "n"/"e"/"ne": set of cells,
+    "folds": the folds the slice has rows of}}``.
     """
     from mival.stages.evaluate import UPDATE_NONE
 
     frame = metrics.frame
     keys = _row_keys(frame, [c for c in slice_cols if c != "fold"])
+    fold = (frame["fold"].map(_key_value).tolist() if "fold" in frame.columns
+            else [None] * len(frame))
     out: Dict[Tuple, Dict[str, Any]] = {}
     for i in range(len(frame)):
         if family_of[i][1] != "core":
             continue
         if "update" in frame.columns and str(frame["update"].iat[i]) != UPDATE_NONE:
             continue
-        entry = out.setdefault(keys[i], {"row": i, "n": set(), "e": set(), "ne": set()})
+        entry = out.setdefault(keys[i], {"row": i, "n": set(), "e": set(), "ne": set(),
+                                         "folds": set()})
+        entry["folds"].add(fold[i])
         for kind in _KINDS:
             cell = getattr(metrics, kind)[i]
             if cell is not None:
@@ -927,9 +944,18 @@ def _link_table1(cells: Cells, metrics: _Counted, whole, t1, outcome_variable,
                 cells.define(made[("scored", arm, split, None, None)], members)
         return cell
 
+    def split_of(i):
+        return str(frame["split"].iat[i]) if "split" in frame.columns else ""
+
+    # The folds an arm's split has rows of, over all its slices.
+    split_folds: Dict[Tuple, Set] = {}
+    for entry in whole.values():
+        split_folds.setdefault((arms[entry["row"]], split_of(entry["row"])), set()).update(
+            entry["folds"])
+
     for entry in whole.values():
         i = entry["row"]
-        split = str(frame["split"].iat[i]) if "split" in frame.columns else ""
+        split = split_of(i)
         subgroup = str(frame["subgroup"].iat[i]) if "subgroup" in frame.columns else "all"
         outcome = str(frame["outcome"].iat[i]) if "outcome" in frame.columns else primary_outcome
         label = (outcome, str(frame["label_def"].iat[i]) if "label_def" in frame.columns else "")
@@ -947,10 +973,14 @@ def _link_table1(cells: Cells, metrics: _Counted, whole, t1, outcome_variable,
         if parts is None or mine is None:
             continue
         cells.at_most(mine, n)
-        # A scored ECG outside n has no label: scored <= unlabelled + n.
-        bound = cells.latent(("unl+n", arms[i], split, axis, level, label), audited=False)
-        cells.define(bound, [parts["unl"]] + n)
-        cells.at_most(bound, [mine])
+        # A scored ECG outside n has no label: scored <= unlabelled + n. Only
+        # with every fold's n: a dev fold row evaluate suppressed is left out
+        # of the bundle (without_dev_suppressed), and the n of the folds left
+        # would make the bound false.
+        if entry["folds"] >= split_folds[(arms[i], split)]:
+            bound = cells.latent(("unl+n", arms[i], split, axis, level, label), audited=False)
+            cells.define(bound, [parts["unl"]] + n)
+            cells.at_most(bound, [mine])
         if not binary[label]:
             cells.at_most(parts["lab"], n)
         elif entry["e"]:
@@ -1018,10 +1048,15 @@ def _apply_counted(table: _Counted, hidden, min_cell, cells: Cells):
         small = (n < min_cell) | ((e == e) & ((e < min_cell) | ((n - e) < min_cell)))
     blank = pd.Series(rows | small, index=out.index)
     _blank(out, blank)
-    out["n"] = [d if d is not None else v for d, v in zip(n_disp, out["n"].tolist())]
+    # Object columns: with no "masked" label among them (min_cell 1), a list of
+    # ints and None would otherwise become float and be written as 133.0.
+    def column(values):
+        return pd.Series([_int_or(v) for v in values], index=out.index, dtype=object)
+
+    out["n"] = column(d if d is not None else v for d, v in zip(n_disp, out["n"].tolist()))
     if "n_events" in out.columns:
-        out["n_events"] = [d if d is not None else v for d, v in zip(e_disp, out["n_events"].tolist())]
-        out["n_nonevents"] = ne_disp
+        out["n_events"] = column(d if d is not None else v for d, v in zip(e_disp, out["n_events"].tolist()))
+        out["n_nonevents"] = column(ne_disp)
     return out, blank
 
 
@@ -1422,8 +1457,12 @@ def sample_size_table(metrics):
         for metric, width in zip(part["metric"], (hi - lo)):
             row[f"ci_width:{metric}"] = None if pd.isna(width) else float(width)
         rows.append(row)
-    return pd.DataFrame(rows, columns=None if rows else
-                        keys + ["n", "n_events", "n_nonevents", "meets_100_events"])
+    table = pd.DataFrame(rows, columns=None if rows else
+                         keys + ["n", "n_events", "n_nonevents", "meets_100_events"])
+    for column in ("n", "n_events", "n_nonevents"):
+        # Counts stay whole numbers next to a missing value (see _apply_counted).
+        table[column] = pd.Series([_int_or(v) for v in table[column].tolist()], index=table.index, dtype=object)
+    return table
 
 
 # ---------------------------------------------------------------------------
@@ -2067,8 +2106,21 @@ def _write_json(path: Path, body: Any) -> Path:
     return _write_text(path, json.dumps(body, indent=2, ensure_ascii=False, default=str) + "\n")
 
 
+#: Record and event counts: written as whole numbers even when a missing value
+#: in the same column made pandas store them as float (133, not 133.0).
+COUNT_COLUMNS = ("n", "n_events", "n_nonevents")
+
+
 def _write_csv(path: Path, frame) -> Path:
+    import pandas as pd
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    counts = [c for c in COUNT_COLUMNS if c in frame.columns]
+    if counts:
+        frame = frame.copy()
+        for column in counts:
+            frame[column] = pd.Series([_int_or(v) for v in frame[column].tolist()],
+                                      index=frame.index, dtype=object)
     # pandas ends lines with os.linesep by default (CRLF on Windows).
     frame.to_csv(path, index=False, lineterminator="\n")
     return path
@@ -2217,6 +2269,8 @@ class _Bundle:
         #: ``--allow-small-stage-totals``: proceed, and record the stages.
         self.allow_small_stage_totals = False
         self.small_stage_totals: Dict[str, Dict[str, int]] = {}
+        #: study -> metrics rows of the dev split that evaluate suppressed, left out.
+        self.dev_suppressed_left_out: Dict[str, int] = {}
         self.figure_notes: List[str] = []
 
     def path(self, relative: str) -> Path:
@@ -2273,6 +2327,13 @@ def _figures(bundle: _Bundle, study_id: str, curves, metrics, stard) -> None:
                 label = f"{study_id}_{name}" if len(outcomes) == 1 else f"{study_id}_{outcome}_{name}"
                 _draw(bundle, label, getattr(figures, function), curves, outcome=outcome)
 
+    if curves is not None and len(curves):
+        roc = roc_table(curves, metrics, study_id)
+        for outcome in sorted(set(roc["outcome"].astype(str))):
+            many = roc["outcome"].astype(str).nunique() > 1
+            label = f"{study_id}_roc" + (f"_{outcome}" if many else "")
+            _draw(bundle, label, figures.roc_from_table, roc, outcome=outcome)
+
     if metrics is not None and len(metrics):
         test = metrics[(metrics["split"].astype(str) == TEST_SPLIT)
                        & (metrics["update"] == UPDATE_NONE)]
@@ -2306,6 +2367,92 @@ def _stard(study, runs_root: Path, runs_json: Path, evaluate_dirs):
         inputs={RUNS_INPUT: runs_json},
     )
     return _stard_counts(ctx, counts[STARD_COUNT_ANALYSED], counts[STARD_COUNT_DEV])
+
+
+#: Columns of ``curves/<study>_roc_curves.csv``, one row per arm x ROC series x FPR point.
+ROC_TABLE_COLUMNS = (
+    "site", "study_id", "model_id", "training_mode", "label_def", "outcome", "roc",
+    "auroc", "auroc_ci_lo", "auroc_ci_hi", "n", "n_events",
+    "fpr", "tpr", "tpr_ci_lo", "tpr_ci_hi",
+)
+
+
+def roc_table(curves, metrics, study_id: str):
+    """The ``roc`` curves of ``curves_long`` as one flat table, for drawing several on one plot.
+
+    Every site's file has the same FPR grid (``_curve_rows.ROC_POINTS``), so
+    files from several sites (or several studies) can be stacked and drawn
+    directly, or averaged at each FPR. ``roc`` names the series (``tpr``,
+    ``tpr_cut@le40``, ``tpr_horizon_cc@365``) and ``auroc`` is the matching
+    metric of the test split (``auroc``, ``auroc_cut@le40``, ...), from the
+    exported metrics table, so a legend needs nothing else. ``recipe_id``
+    (a config hash) is not a column: it only tells apart arms that already
+    differ in ``training_mode`` or ``label_def``.
+    """
+    import pandas as pd
+
+    from mival.stages._curve_rows import ROC, ROC_METRIC
+    from mival.stages.evaluate import SUBGROUP_ALL, UPDATE_NONE
+
+    rows = curves[curves["curve"] == ROC] if "curve" in curves.columns else curves.iloc[0:0]
+    if not len(rows):
+        return pd.DataFrame(columns=list(ROC_TABLE_COLUMNS))
+    arm = ["site", "model_id", "training_mode", "recipe_id", "perturbation_id", "label_def"]
+    out = pd.DataFrame({
+        "site": rows["site"].astype(str),
+        "study_id": study_id,
+        "model_id": rows["model_id"].astype(str),
+        "training_mode": rows["training_mode"].astype(str),
+        "label_def": rows["label_def"].astype(str),
+        "outcome": rows["outcome"].astype(str),
+        "roc": rows["metric"].astype(str),
+        "n": rows["n"],
+        "n_events": rows["n_events"],
+        "fpr": pd.to_numeric(rows["x"], errors="coerce"),
+        "tpr": pd.to_numeric(rows["value"], errors="coerce"),
+        "tpr_ci_lo": pd.to_numeric(rows["ci_lo"], errors="coerce"),
+        "tpr_ci_hi": pd.to_numeric(rows["ci_hi"], errors="coerce"),
+    })
+    keys = rows[arm + ["outcome"]].astype(str).agg("\x1f".join, axis=1)
+    out["_key"] = keys.to_numpy()
+    out["_auroc"] = out["roc"].str.replace(ROC_METRIC, "auroc", n=1, regex=False)
+    if metrics is not None and len(metrics):
+        m = metrics[(metrics["split"].astype(str) == TEST_SPLIT)
+                    & (metrics["subgroup"].astype(str) == SUBGROUP_ALL)
+                    & (metrics["update"].astype(str) == UPDATE_NONE)]
+        auc = pd.DataFrame({
+            "_key": m[arm + ["outcome"]].astype(str).agg("\x1f".join, axis=1).to_numpy(),
+            "_auroc": m["metric"].astype(str).to_numpy(),
+            "auroc": pd.to_numeric(m["value"], errors="coerce").to_numpy(),
+            "auroc_ci_lo": pd.to_numeric(m["ci_lo"], errors="coerce").to_numpy(),
+            "auroc_ci_hi": pd.to_numeric(m["ci_hi"], errors="coerce").to_numpy(),
+        }).drop_duplicates(subset=["_key", "_auroc"])
+        out = out.merge(auc, on=["_key", "_auroc"], how="left")
+    for column in ROC_TABLE_COLUMNS:
+        if column not in out.columns:
+            out[column] = float("nan")
+    out = out.sort_values(["model_id", "training_mode", "label_def", "outcome", "roc", "fpr"],
+                          kind="mergesort")
+    return out[list(ROC_TABLE_COLUMNS)].reset_index(drop=True)
+
+
+def without_dev_suppressed(metrics, dev_split: str = DEV_SPLIT):
+    """``(metrics, n_left_out)``: the rows of the dev split that evaluate suppressed are dropped.
+
+    Such a row (too few events in a dev fold or a dev subgroup) leaves the
+    bundle with its value withheld; what it would still carry is its small
+    event count. Across folds, subgroups and cuts those counts can be
+    impossible to protect, and the masking then refuses the whole export
+    (a 981-person potassium study with rare hyperkalaemia did). Dev rows are
+    not reported results, so they are left out and only their number is
+    recorded in the export manifest. Test rows are never dropped here.
+    """
+    if "suppressed" not in metrics.columns or "split" not in metrics.columns:
+        return metrics, 0
+    suppressed = metrics["suppressed"].map(lambda v: str(v).strip().lower() in ("true", "1"))
+    drop = suppressed & (metrics["split"].astype(str) == dev_split)
+    n = int(drop.sum())
+    return (metrics[~drop].reset_index(drop=True) if n else metrics), n
 
 
 def _small_stage_totals(exclusions, min_cell) -> Dict[str, int]:
@@ -2500,6 +2647,10 @@ def _export_study(bundle: _Bundle, study, runs_root: Path, home: Path) -> Dict[s
     metrics = _concat_tables(evaluate_dirs, METRICS_LONG)
     if metrics is None:
         raise ValueError(f"study {sid}: evaluate run has no {METRICS_LONG}")
+    dev_split = str(study.stage_spec("evaluate").get("dev_split", DEV_SPLIT))
+    metrics, left_out = without_dev_suppressed(metrics, dev_split)
+    if left_out:
+        bundle.dev_suppressed_left_out[sid] = left_out
     comparisons = _concat_tables(evaluate_dirs, COMPARISONS)
     if comparisons is None:
         comparisons = pd.DataFrame(columns=list(COMPARISON_COLUMNS))
@@ -2548,6 +2699,9 @@ def _export_study(bundle: _Bundle, study, runs_root: Path, home: Path) -> Dict[s
     if curves is not None:
         curves = mask_curves(curves, min_cell, hidden)
         _write_csv(bundle.path(f"curves/{sid}_curves.csv"), curves)
+        roc = roc_table(curves, metrics, sid)
+        if len(roc):
+            _write_csv(bundle.path(f"curves/{sid}_roc_curves.csv"), roc)
 
     if _has_matplotlib():
         stard = None
@@ -2612,6 +2766,12 @@ def _missing_library_notes() -> List[str]:
     return notes
 
 
+def _mival_version() -> str:
+    from mival import __version__
+
+    return __version__
+
+
 def _source_sha256() -> Optional[str]:
     from mival.pipeline.manifest import code_identity
 
@@ -2672,9 +2832,14 @@ def build_bundle(studies: Sequence[str], study_root: Path, runs_root: Path, home
             # models run used, so a pooled reader knows a site ran a card
             # differently from the reference machine.
             "arms": {sid: item["arms"] for sid, item in exported.items()},
+            # The release every site runs (the miva tag v<version>) and the
+            # digest of the exact source, so two sites' zips can be checked
+            # to come from the same code.
+            "export_mival_version": _mival_version(),
             "export_source_sha256": _source_sha256(),
             "allow_small_stage_totals": bundle.allow_small_stage_totals,
             "small_stage_totals": bundle.small_stage_totals,
+            "dev_suppressed_rows_left_out": bundle.dev_suppressed_left_out,
             # What the bundle left out and why (no STARD counts, a library
             # missing, a figure warning), for whoever reads it later.
             "notes": bundle.notes + _missing_library_notes() + bundle.figure_notes,

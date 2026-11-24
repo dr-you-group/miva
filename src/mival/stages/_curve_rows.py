@@ -73,6 +73,17 @@ REGRESSION_CALIBRATION_BINS = 20
 SURVIVAL_THRESHOLD_GRID = "survival_threshold_grid"
 KM_BY_RISK_GROUP = "km_by_risk_group"
 CALIBRATION_HORIZON = "calibration_horizon"
+#: ``roc``: x is the false-positive rate on a fixed grid (0, 0.01, ..., 1),
+#: metric ``tpr`` (a probability arm), ``tpr_cut@<cut>`` (a regression arm at
+#: one of its cuts) or ``tpr_horizon_cc@<h>`` (a survival arm at its first
+#: horizon), each named like the AUROC it draws (``auroc``, ``auroc_cut@...``,
+#: ``auroc_horizon_cc@...``). The grid is the same at every site, so ROC
+#: curves of several sites or models can be drawn on one plot from the tables
+#: alone. The test split, subgroup ``all``, shipped model only (a monotone
+#: recalibration leaves the ROC curve unchanged).
+ROC = "roc"
+ROC_POINTS = 101
+ROC_METRIC = "tpr"
 KM_STEP_DAYS = 15
 KM_RISK_GROUPS = 4
 SURVIVAL_CALIBRATION_BINS = 10
@@ -370,3 +381,75 @@ def _finite(value) -> Optional[float]:
     """NaN becomes NULL in the table: an undefined point is not a number."""
     number = float(value)
     return None if math.isnan(number) or math.isinf(number) else number
+
+
+def roc_tpr(labels, score, grid) -> "Any":
+    """True-positive rate at each false-positive rate of ``grid``.
+
+    The empirical ROC curve is the polyline through its vertices, one per
+    distinct score (tied scores give a diagonal segment). At an FPR where the
+    curve rises vertically the value is the top of that rise, so FPR 0 gives
+    the TPR reached before the first false positive; between vertices it is
+    read off the segment. The area under the grid points therefore
+    approaches the AUROC as the grid gets finer. NaN when the slice has no
+    events or no non-events.
+    """
+    import numpy as np
+
+    y = np.asarray(labels, dtype=float) == 1.0
+    p = np.asarray(score, dtype=float)
+    n_pos, n_neg = int(y.sum()), int((~y).sum())
+    grid = np.asarray(grid, dtype=float)
+    if n_pos == 0 or n_neg == 0:
+        return np.full(grid.shape, np.nan)
+    order = np.argsort(-p, kind="mergesort")
+    p, y = p[order], y[order]
+    # One vertex per distinct score (descending), so tied scores move TPR and FPR together.
+    last = np.r_[np.nonzero(np.diff(p))[0], p.size - 1]
+    tps = np.cumsum(y)[last]
+    fps = (last + 1) - tps
+    fpr = np.r_[0.0, fps / n_neg]
+    tpr = np.r_[0.0, tps / n_pos]
+    # fpr and tpr are non-decreasing, so the last vertex at or before x is the
+    # top of any vertical rise at x and the next one lies strictly to its right.
+    at = np.searchsorted(fpr, grid, side="right") - 1
+    nxt = np.minimum(at + 1, fpr.size - 1)
+    span = fpr[nxt] - fpr[at]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        weight = np.where(span > 0, (grid - fpr[at]) / span, 0.0)
+    return tpr[at] + weight * (tpr[nxt] - tpr[at])
+
+
+def roc_curve_rows(
+    key: RunKey,
+    subgroup: str,
+    outcome: str,
+    metric: str,
+    labels,
+    score,
+    groups: Optional[Sequence],
+    n_replicates: int,
+    seed: int,
+    alpha: float,
+) -> List[Dict[str, Any]]:
+    """The ``roc`` curve of one slice: TPR on the fixed FPR grid, with a person-level band.
+
+    ``labels`` are 0/1 and ``score`` is higher for an event. The band is the
+    same percentile bootstrap as the threshold grid's, by person.
+    """
+    import numpy as np
+
+    from mival.metrics.curves import curve_bootstraps
+
+    y = np.asarray(labels, dtype=float)
+    p = np.asarray(score, dtype=float)
+    grid = np.linspace(0.0, 1.0, ROC_POINTS)
+
+    def statistic(y_values, p_values):
+        return {metric: roc_tpr(y_values, p_values, grid)}
+
+    bands = curve_bootstraps({ROC: statistic}, y, p, groups, n_replicates, seed, alpha)
+    return curve_rows(
+        key, subgroup, outcome, "none", ROC, grid, statistic(y, p),
+        bands.get(ROC, {}), int(y.size), int(np.sum(y == 1.0)),
+    )

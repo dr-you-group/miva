@@ -52,6 +52,8 @@ TIER_STEMS: Dict[str, Tuple[str, ...]] = {
         "tn",
         "fn",
         "auroc_cut",
+        # Where a policy's 2x2 was cut (threshold@refit_sens95 ...).
+        "threshold",
     ),
     SUPPLEMENTARY: (
         "auprc",
@@ -73,6 +75,15 @@ TIER_STEMS: Dict[str, Tuple[str, ...]] = {
         "auroc_below",
         "c_index",
         "auroc_horizon_cc",
+        # Error spread an age-prediction paper reports (PROPHECG-Age) and the
+        # share past each residual cut (age gap >= +7 ...).
+        "mae_sd",
+        "mse",
+        "mse_sd",
+        "mape",
+        "mape_sd",
+        "pearson_r",
+        "residual_frac",
     ),
 }
 

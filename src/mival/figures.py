@@ -470,16 +470,31 @@ def _numeric(frame, columns):
     return out
 
 
+#: Arm axes that never go into a legend: ``recipe_id`` is a config hash
+#: (e.g. ``5c2c11``) that tells a reader nothing. Two arms that differ only
+#: there are told apart by a running number instead.
+_UNLABELLED_AXES = ("recipe_id",)
+
+
 def _arm_labels(frame) -> dict:
-    """Arm key -> label built from the axes that differ between arms."""
+    """Arm key -> label built from the readable axes that differ between arms."""
     axes = [a for a in _ARM_AXES if a in frame.columns]
-    varying = [a for a in axes if frame[a].astype(str).nunique() > 1]
+    readable = [a for a in axes if a not in _UNLABELLED_AXES]
+    varying = [a for a in readable if frame[a].astype(str).nunique() > 1]
     if not varying:
         varying = [a for a in ("model_id",) if a in frame.columns]
     labels: dict = {}
     for _, row in frame[axes].drop_duplicates().iterrows():
         key = tuple(str(row[a]) for a in axes)
         labels[key] = " / ".join(str(row[a]) for a in varying) or "all"
+    # Labels must stay one per arm: _wide keys its series by label.
+    seen: dict = {}
+    for key in sorted(labels):
+        seen.setdefault(labels[key], []).append(key)
+    for label, keys in seen.items():
+        if len(keys) > 1:
+            for number, key in enumerate(keys, start=1):
+                labels[key] = f"{label} ({number})"
     return labels
 
 
@@ -822,3 +837,52 @@ def forest_from_metrics(metrics, metric, path, update=None, outcome=None) -> Pat
 def stard_from_counts(stages, exclusions, path, title="STARD participant flow", side=()) -> Path:
     """STARD flow from a counts table; a masked count ("<10") is printed as text."""
     return stard_flow(stages, exclusions, path, title=title, side=side)
+
+
+def roc_from_table(roc, path, outcome=None) -> Path:
+    """Every ROC series of ``curves/<study>_roc_curves.csv`` on one plot, AUROC in the legend.
+
+    ``roc`` is :func:`mival.export.roc_table`'s frame (or several of them
+    stacked, e.g. from several sites: ``site`` then enters the label). A
+    series is labelled by the columns that vary between series, never by
+    ``recipe_id``; its band is the bootstrap interval where present.
+    """
+    pyplot = _pyplot()
+    rows = roc
+    if outcome is not None and "outcome" in rows.columns:
+        rows = rows[rows["outcome"].astype(str) == str(outcome)]
+    rows = _numeric(rows, ("fpr", "tpr", "tpr_ci_lo", "tpr_ci_hi", "auroc"))
+    series_cols = [c for c in ("site", "study_id", "model_id", "training_mode", "label_def", "roc")
+                   if c in rows.columns]
+    varying = [c for c in series_cols if rows[c].astype(str).nunique() > 1] or ["model_id"]
+    figure, axes = pyplot.subplots(figsize=(5.2, 5.0))
+    drawn = False
+    for key, part in rows.groupby([rows[c].astype(str) for c in series_cols], sort=True):
+        part = part.dropna(subset=["fpr", "tpr"]).sort_values("fpr")
+        if not len(part):
+            continue
+        values = dict(zip(series_cols, key if isinstance(key, tuple) else (key,)))
+        label = " / ".join(values[c] for c in varying)
+        auc = part["auroc"].dropna()
+        if len(auc):
+            label += f" (AUROC {float(auc.iloc[0]):.3f})"
+        (line,) = axes.plot(part["fpr"], part["tpr"], label=label, linewidth=1.2)
+        band = part.dropna(subset=["tpr_ci_lo", "tpr_ci_hi"])
+        if len(band):
+            axes.fill_between(band["fpr"], band["tpr_ci_lo"], band["tpr_ci_hi"],
+                              color=line.get_color(), alpha=0.15, linewidth=0)
+        drawn = True
+    axes.plot([0, 1], [0, 1], linestyle=":", color="0.6")
+    axes.set_xlim(0, 1)
+    axes.set_ylim(0, 1.02)
+    axes.set_xlabel("1 - specificity")
+    axes.set_ylabel("sensitivity")
+    axes.set_title("ROC" + (f" (outcome={outcome})" if outcome is not None else ""), fontsize=9)
+    if drawn:
+        axes.legend(fontsize=7, loc="lower right")
+    else:
+        _empty_note(axes, "no ROC rows")
+        import warnings
+
+        warnings.warn(f"no ROC rows for outcome={outcome}", stacklevel=2)
+    return _save(figure, path)
